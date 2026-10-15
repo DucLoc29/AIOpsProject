@@ -1,0 +1,18 @@
+# Containerlab tự sinh (inventory, TLS key, state) - không đưa vào git
+clab-*/
+.clab.*
+*.bak
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Bí mật và dữ liệu lớn (bổ sung khi có giai đoạn 2-4)
+.env
+*.pem
+*.key
+data/raw/
+models/*.pkl
+models/*.h5

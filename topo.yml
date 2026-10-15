@@ -1,0 +1,186 @@
+# =============================================================================
+#  AIOps Lab - Topology Containerlab
+#  Đề tài: Hệ thống giám sát, phát hiện bất thường & tự động ứng phó sự cố mạng
+#  Tài liệu IP chi tiết: docs/network-design.md
+#
+#  Quy ước:
+#   - eth0 của MỌI node = mạng quản lý OOB (172.20.20.0/24), do Containerlab tạo.
+#     Prometheus thu thập metric qua mạng này -> không bị ảnh hưởng khi tấn công.
+#   - eth1, eth2, ... = mạng dữ liệu (data plane), được mô tả trong phần links.
+#   - Default route của host Linux giữ trên eth0 (để cài gói). Mạng dữ liệu dùng
+#     route cụ thể cho các dải trong lab.
+#
+#  Chạy:  ./scripts/deploy.sh      Huỷ:  ./scripts/destroy.sh
+# =============================================================================
+name: aiops-prod
+
+mgmt:
+  network: clab
+  ipv4-subnet: 172.20.20.0/24
+
+topology:
+  nodes:
+    # -------------------------------------------------------------------------
+    # 1. Core Router (Edge) - FRR, OSPF RID 2.2.2.2
+    #    eth1 10.0.1.1/30 (-> FW) | eth2 10.0.12.2/30 | eth3 10.0.13.2/30
+    #    eth4 203.0.113.1/24 (-> Internet)
+    # -------------------------------------------------------------------------
+    core-router:
+      kind: linux
+      image: frrouting/frr:latest
+      mgmt-ipv4: 172.20.20.11
+      binds:
+        - config/core-frr.conf:/etc/frr/frr.conf
+        - config/daemons:/etc/frr/daemons
+        - config/vtysh.conf:/etc/frr/vtysh.conf
+      exec:
+        - sysctl -w net.ipv4.ip_forward=1
+
+    # -------------------------------------------------------------------------
+    # 2. Branch Router - FRR, OSPF RID 1.1.1.1
+    #    eth1 172.16.1.1/24 | eth2 10.0.12.1/30 (Primary) | eth3 10.0.13.1/30 (Backup)
+    # -------------------------------------------------------------------------
+    branch-router:
+      kind: linux
+      image: frrouting/frr:latest
+      mgmt-ipv4: 172.20.20.12
+      binds:
+        - config/branch-frr.conf:/etc/frr/frr.conf
+        - config/daemons:/etc/frr/daemons
+        - config/vtysh.conf:/etc/frr/vtysh.conf
+      exec:
+        - sysctl -w net.ipv4.ip_forward=1
+
+    # -------------------------------------------------------------------------
+    # 3. Firewall - Linux + iptables
+    #    eth1 10.0.1.2/30 (outside) | eth2 192.168.10.1/24 (inside, gateway LAN)
+    # -------------------------------------------------------------------------
+    firewall:
+      kind: linux
+      image: alpine:latest
+      mgmt-ipv4: 172.20.20.13
+      cmd: sleep infinity
+      exec:
+        - apk add --no-cache -q iptables tcpdump
+        - sysctl -w net.ipv4.ip_forward=1
+        - ip addr add 10.0.1.2/30 dev eth1
+        - ip addr add 192.168.10.1/24 dev eth2
+        - ip link set dev eth1 up
+        - ip link set dev eth2 up
+        - ip route replace 172.16.1.0/24 via 10.0.1.1
+        - ip route replace 10.0.0.0/16 via 10.0.1.1
+        - ip route replace 203.0.113.0/24 via 10.0.1.1
+
+    # -------------------------------------------------------------------------
+    # 4. LAN Switch - Linux bridge trên host (scripts/deploy.sh tạo trước)
+    # -------------------------------------------------------------------------
+    lan-switch:
+      kind: bridge
+
+    # -------------------------------------------------------------------------
+    # 5. Service Server - Nginx (MỤC TIÊU bị tấn công)
+    #    eth1 192.168.10.10/24, GW 192.168.10.1
+    # -------------------------------------------------------------------------
+    service-server:
+      kind: linux
+      image: nginx:alpine
+      mgmt-ipv4: 172.20.20.21
+      exec:
+        - ip addr add 192.168.10.10/24 dev eth1
+        - ip link set dev eth1 up
+        - ip route replace 172.16.0.0/16 via 192.168.10.1
+        - ip route replace 10.0.0.0/16 via 192.168.10.1
+        - ip route replace 203.0.113.0/24 via 192.168.10.1
+
+    # -------------------------------------------------------------------------
+    # 6. AIOps Server - Bộ não giám sát & AI (Prometheus/Grafana sẽ bổ sung)
+    #    eth1 192.168.10.20/24 | mgmt 172.20.20.22 (dùng để scrape metric)
+    # -------------------------------------------------------------------------
+    aiops-server:
+      kind: linux
+      image: alpine:latest
+      mgmt-ipv4: 172.20.20.22
+      cmd: sleep infinity
+      exec:
+        - apk add --no-cache -q curl
+        - ip addr add 192.168.10.20/24 dev eth1
+        - ip link set dev eth1 up
+        - ip route replace 172.16.0.0/16 via 192.168.10.1
+        - ip route replace 10.0.0.0/16 via 192.168.10.1
+        - ip route replace 203.0.113.0/24 via 192.168.10.1
+
+    # -------------------------------------------------------------------------
+    # 7. Client PC - Người dùng nội bộ / ATTACKER NỘI BỘ (insider, lateral)
+    #    eth1 192.168.10.30/24
+    # -------------------------------------------------------------------------
+    client-pc:
+      kind: linux
+      image: alpine:latest
+      mgmt-ipv4: 172.20.20.23
+      cmd: sleep infinity
+      exec:
+        - apk add --no-cache -q curl iperf3 nmap
+        - apk add --no-cache -q hping3 --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing
+        - ip addr add 192.168.10.30/24 dev eth1
+        - ip link set dev eth1 up
+        - ip route replace 172.16.0.0/16 via 192.168.10.1
+        - ip route replace 10.0.0.0/16 via 192.168.10.1
+        - ip route replace 203.0.113.0/24 via 192.168.10.1
+
+    # -------------------------------------------------------------------------
+    # 8. Branch Client - Tải bình thường / ATTACKER CHI NHÁNH (compromised host)
+    #    eth1 172.16.1.10/24, GW 172.16.1.1
+    # -------------------------------------------------------------------------
+    branch-client:
+      kind: linux
+      image: alpine:latest
+      mgmt-ipv4: 172.20.20.31
+      cmd: sleep infinity
+      exec:
+        - apk add --no-cache -q curl iperf3 nmap
+        - apk add --no-cache -q hping3 --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing
+        - ip addr add 172.16.1.10/24 dev eth1
+        - ip link set dev eth1 up
+        - ip route replace 192.168.10.0/24 via 172.16.1.1
+        - ip route replace 10.0.0.0/16 via 172.16.1.1
+        - ip route replace 203.0.113.0/24 via 172.16.1.1
+
+    # -------------------------------------------------------------------------
+    # 9. Internet Attacker - Mô phỏng "Net" / tấn công TỪ BÊN NGOÀI
+    #    eth1 203.0.113.10/24, GW 203.0.113.1 (Core eth4)
+    # -------------------------------------------------------------------------
+    internet-attacker:
+      kind: linux
+      image: alpine:latest
+      mgmt-ipv4: 172.20.20.41
+      cmd: sleep infinity
+      exec:
+        - apk add --no-cache -q curl iperf3 nmap
+        - apk add --no-cache -q hping3 --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing
+        - ip addr add 203.0.113.10/24 dev eth1
+        - ip link set dev eth1 up
+        - ip route replace 192.168.10.0/24 via 203.0.113.1
+        - ip route replace 172.16.0.0/16 via 203.0.113.1
+        - ip route replace 10.0.0.0/16 via 203.0.113.1
+
+  links:
+    # Chi nhánh: Branch Client <-> Branch Router            (172.16.1.0/24)
+    - endpoints: ["branch-client:eth1", "branch-router:eth1"]
+
+    # WAN dự phòng Branch <-> Core (OSPF area 0)
+    - endpoints: ["branch-router:eth2", "core-router:eth2"]   # WAN1 Primary 10.0.12.0/30 cost 10
+    - endpoints: ["branch-router:eth3", "core-router:eth3"]   # WAN2 Backup  10.0.13.0/30 cost 50
+
+    # Core <-> Firewall (outside)                            (10.0.1.0/30)
+    - endpoints: ["core-router:eth1", "firewall:eth1"]
+
+    # Core <-> Internet                                      (203.0.113.0/24)
+    - endpoints: ["core-router:eth4", "internet-attacker:eth1"]
+
+    # Firewall (inside) <-> LAN Switch                       (192.168.10.0/24)
+    - endpoints: ["firewall:eth2", "lan-switch:eth1"]
+
+    # Các thiết bị trong LAN
+    - endpoints: ["service-server:eth1", "lan-switch:eth2"]
+    - endpoints: ["client-pc:eth1", "lan-switch:eth3"]
+    - endpoints: ["aiops-server:eth1", "lan-switch:eth4"]
