@@ -36,7 +36,7 @@
 ### Giai đoạn 1 – Topology: ✅ HOÀN THÀNH và đã kiểm chứng
 Đã kiểm chứng đạt 26/26 PASS, OSPF WAN failover Primary (cost 10) ↔ Backup (cost 50) hội tụ ~1s.
 
-### Giai đoạn 2 – Giám sát (Prometheus, Alertmanager, Grafana): ✅ HOÀN THÀNH CẤU HÌNH & TÍCH HỢP
+### Giai đoạn 2 – Giám sát (Prometheus, Alertmanager, Grafana): ✅ HOÀN THÀNH & ĐÃ KIỂM CHỨNG (31/31 PASS)
 1. **Prometheus (`172.20.20.51:9090`)**:
    - File cấu hình: `monitoring/prometheus/prometheus.yml` (scrape interval 5s qua mạng OOB `172.20.20.0/24`).
    - Alert rules: `monitoring/prometheus/rules/network_alerts.yml` (HostDown, WANLinkDown, HighPacketRate, HighPacketDropRate, HighCpuUsage).
