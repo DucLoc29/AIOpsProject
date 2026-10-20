@@ -4,22 +4,29 @@ cd "$(dirname "$0")/.."
 P=clab-aiops-prod
 PASS=0; FAIL=0
 
+# Tự động nhận diện lệnh docker (dùng sudo nếu cần)
+if docker ps >/dev/null 2>&1; then
+  DKR="docker"
+else
+  DKR="sudo docker"
+fi
+
 ok()   { echo -e "  \e[32m[PASS]\e[0m $1"; PASS=$((PASS+1)); }
 bad()  { echo -e "  \e[31m[FAIL]\e[0m $1"; FAIL=$((FAIL+1)); }
-dx()   { sudo docker exec "$P-$1" sh -c "$2" >/dev/null 2>&1; }
+dx()   { $DKR exec "$P-$1" sh -c "$2" >/dev/null 2>&1; }
 
 ping_test() { # node target label
   dx "$1" "ping -c2 -W1 $2" && ok "$3 ($1 -> $2)" || bad "$3 ($1 -> $2)"
 }
 
 echo "== 1. OSPF neighbors"
-N=$(sudo docker exec $P-branch-router vtysh -c "show ip ospf neighbor" 2>/dev/null | grep -c Full)
+N=$($DKR exec $P-branch-router vtysh -c "show ip ospf neighbor" 2>/dev/null | grep -c Full || true)
 [ "$N" -eq 2 ] && ok "Branch có 2 neighbor Full (WAN1 + WAN2)" || bad "Branch chỉ có $N neighbor Full"
 
 echo "== 2. Đường đi ưu tiên (phải qua WAN1 10.0.12.2)"
-sudo docker exec $P-branch-router vtysh -c "show ip route 192.168.10.0/24" 2>/dev/null \
+$DKR exec $P-branch-router vtysh -c "show ip route 192.168.10.0/24" 2>/dev/null \
   | grep -q "10.0.12.2, via eth2" && ok "192.168.10.0/24 qua WAN1 Primary" || bad "192.168.10.0/24 không qua WAN1"
-sudo docker exec $P-branch-router vtysh -c "show ip route 203.0.113.0/24" 2>/dev/null \
+$DKR exec $P-branch-router vtysh -c "show ip route 203.0.113.0/24" 2>/dev/null \
   | grep -q "10.0.12.2, via eth2" && ok "203.0.113.0/24 qua WAN1 Primary" || bad "203.0.113.0/24 không qua WAN1"
 
 echo "== 3. Kết nối chi nhánh"
@@ -41,12 +48,15 @@ for n in branch-client internet-attacker client-pc; do
   dx $n "curl -sf -m3 http://192.168.10.10" && ok "HTTP từ $n" || bad "HTTP từ $n"
 done
 
-echo "== 7. Mạng quản lý OOB (Prometheus -> các node qua 172.20.20.0/24)"
-for ip in 11 12 13 21 23 31 41 52 53; do
-  sudo docker exec $P-prometheus wget -q --spider --timeout=1 http://172.20.20.$ip:9100/metrics 2>/dev/null \
-    || sudo docker exec $P-prometheus ping -c1 -W1 172.20.20.$ip >/dev/null 2>&1 \
-    && ok "OOB 172.20.20.$ip reachable" || bad "OOB 172.20.20.$ip unreachable"
+echo "== 7. Mạng quản lý OOB (Prometheus scrape qua 172.20.20.0/24)"
+for ip in 11 12 13 21 23 31 41; do
+  $DKR exec $P-prometheus wget -q --spider -T2 http://172.20.20.$ip:9100/metrics >/dev/null 2>&1 \
+    && ok "OOB Node 172.20.20.$ip exporter online" || bad "OOB Node 172.20.20.$ip exporter offline"
 done
+$DKR exec $P-prometheus wget -q --spider -T2 http://172.20.20.52:9093/-/ready >/dev/null 2>&1 \
+  && ok "OOB Alertmanager 172.20.20.52 online" || bad "OOB Alertmanager 172.20.20.52 offline"
+$DKR exec $P-prometheus wget -q --spider -T2 http://172.20.20.53:3000/api/health >/dev/null 2>&1 \
+  && ok "OOB Grafana 172.20.20.53 online" || bad "OOB Grafana 172.20.20.53 offline"
 
 echo "== 8. Công cụ kiểm thử bảo mật"
 dx firewall "iptables -L -n" && ok "iptables trên firewall" || bad "iptables trên firewall"
@@ -56,21 +66,21 @@ done
 
 echo "== 9. Giám sát & AIOps Pipeline (Prometheus, Alertmanager, Grafana)"
 # Kiểm tra Prometheus ready
-sudo docker exec $P-prometheus wget -qO- http://127.0.0.1:9090/-/ready >/dev/null 2>&1 \
+$DKR exec $P-prometheus wget -qO- http://127.0.0.1:9090/-/ready >/dev/null 2>&1 \
   && ok "Prometheus server ready" || bad "Prometheus server chưa sẵn sàng"
 
 # Kiểm tra Alertmanager ready
-sudo docker exec $P-alertmanager wget -qO- http://127.0.0.1:9093/-/ready >/dev/null 2>&1 \
+$DKR exec $P-alertmanager wget -qO- http://127.0.0.1:9093/-/ready >/dev/null 2>&1 \
   && ok "Alertmanager server ready" || bad "Alertmanager server chưa sẵn sàng"
 
 # Kiểm tra Grafana API health
-sudo docker exec $P-grafana wget -qO- http://127.0.0.1:3000/api/health 2>/dev/null | grep -q "ok" \
+$DKR exec $P-grafana wget -qO- http://127.0.0.1:3000/api/health 2>/dev/null | grep -q "ok" \
   && ok "Grafana server healthy" || bad "Grafana server chưa sẵn sàng"
 
 # Kiểm tra node_exporter trên các node (scrape status từ Prometheus API)
-ACTIVE_TARGETS=$(sudo docker exec $P-prometheus wget -qO- http://127.0.0.1:9090/api/v1/targets 2>/dev/null \
+ACTIVE_TARGETS=$($DKR exec $P-prometheus wget -qO- http://127.0.0.1:9090/api/v1/targets 2>/dev/null \
   | grep -o '"health":"up"' | wc -l)
-[ "$ACTIVE_TARGETS" -ge 7 ] \
+[ "$ACTIVE_TARGETS" -ge 8 ] \
   && ok "Prometheus scrape targets active ($ACTIVE_TARGETS targets UP)" \
   || bad "Prometheus scrape targets: chỉ có $ACTIVE_TARGETS targets UP"
 

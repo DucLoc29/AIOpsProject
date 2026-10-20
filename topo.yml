@@ -36,7 +36,7 @@ topology:
       exec:
         - sysctl -w net.ipv4.ip_forward=1
         - apk add --no-cache -q prometheus-node-exporter
-        - nohup node_exporter >/dev/null 2>&1 &
+        - sh -c "nohup node_exporter >/dev/null 2>&1 &"
 
     # -------------------------------------------------------------------------
     # 2. Branch Router - FRR, OSPF RID 1.1.1.1
@@ -54,7 +54,7 @@ topology:
       exec:
         - sysctl -w net.ipv4.ip_forward=1
         - apk add --no-cache -q prometheus-node-exporter
-        - nohup node_exporter >/dev/null 2>&1 &
+        - sh -c "nohup node_exporter >/dev/null 2>&1 &"
 
     # -------------------------------------------------------------------------
     # 3. Firewall - Linux + iptables
@@ -76,7 +76,7 @@ topology:
         - ip route replace 172.16.1.0/24 via 10.0.1.1
         - ip route replace 10.0.0.0/16 via 10.0.1.1
         - ip route replace 203.0.113.0/24 via 10.0.1.1
-        - nohup node_exporter >/dev/null 2>&1 &
+        - sh -c "nohup node_exporter >/dev/null 2>&1 &"
 
     # -------------------------------------------------------------------------
     # 4. LAN Switch - Linux bridge trên host (scripts/deploy.sh tạo trước)
@@ -99,7 +99,7 @@ topology:
         - ip route replace 172.16.0.0/16 via 192.168.10.1
         - ip route replace 10.0.0.0/16 via 192.168.10.1
         - ip route replace 203.0.113.0/24 via 192.168.10.1
-        - nohup node_exporter >/dev/null 2>&1 &
+        - sh -c "nohup node_exporter >/dev/null 2>&1 &"
 
     # -------------------------------------------------------------------------
     # 6. Client PC - Người dùng nội bộ / ATTACKER NỘI BỘ (insider, lateral)
@@ -118,7 +118,7 @@ topology:
         - ip route replace 172.16.0.0/16 via 192.168.10.1
         - ip route replace 10.0.0.0/16 via 192.168.10.1
         - ip route replace 203.0.113.0/24 via 192.168.10.1
-        - nohup node_exporter >/dev/null 2>&1 &
+        - sh -c "nohup node_exporter >/dev/null 2>&1 &"
 
     # -------------------------------------------------------------------------
     # 7. Branch Client - Tải bình thường / ATTACKER CHI NHÁNH (compromised host)
@@ -137,7 +137,7 @@ topology:
         - ip route replace 192.168.10.0/24 via 172.16.1.1
         - ip route replace 10.0.0.0/16 via 172.16.1.1
         - ip route replace 203.0.113.0/24 via 172.16.1.1
-        - nohup node_exporter >/dev/null 2>&1 &
+        - sh -c "nohup node_exporter >/dev/null 2>&1 &"
 
     # -------------------------------------------------------------------------
     # 8. Internet Attacker - Mô phỏng "Net" / tấn công TỪ BÊN NGOÀI
@@ -156,7 +156,7 @@ topology:
         - ip route replace 192.168.10.0/24 via 203.0.113.1
         - ip route replace 172.16.0.0/16 via 203.0.113.1
         - ip route replace 10.0.0.0/16 via 203.0.113.1
-        - nohup node_exporter >/dev/null 2>&1 &
+        - sh -c "nohup node_exporter >/dev/null 2>&1 &"
 
     # =========================================================================
     # CỤM GIÁM SÁT AIOPS (GIAI ĐOẠN 2) - NỐI MẠNG OOB (172.20.20.0/24)
