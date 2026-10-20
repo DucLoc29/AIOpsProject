@@ -1,0 +1,78 @@
+# =============================================================================
+#  Prometheus Configuration - AIOps Lab
+#  Mạng OOB: 172.20.20.0/24
+# =============================================================================
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+  scrape_timeout: 4s
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['172.20.20.52:9093']
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+scrape_configs:
+  # 1. Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['127.0.0.1:9090']
+        labels:
+          instance: 'prometheus'
+          role: 'monitoring'
+
+  # 2. Alertmanager monitoring
+  - job_name: 'alertmanager'
+    static_configs:
+      - targets: ['172.20.20.52:9093']
+        labels:
+          instance: 'alertmanager'
+          role: 'monitoring'
+
+  # 3. Network Infrastructure & Hosts (node_exporter qua OOB eth0)
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['172.20.20.11:9100']
+        labels:
+          instance: 'core-router'
+          device_type: 'router'
+          zone: 'hq'
+
+      - targets: ['172.20.20.12:9100']
+        labels:
+          instance: 'branch-router'
+          device_type: 'router'
+          zone: 'branch'
+
+      - targets: ['172.20.20.13:9100']
+        labels:
+          instance: 'firewall'
+          device_type: 'firewall'
+          zone: 'hq'
+
+      - targets: ['172.20.20.21:9100']
+        labels:
+          instance: 'service-server'
+          device_type: 'server'
+          zone: 'lan'
+
+      - targets: ['172.20.20.23:9100']
+        labels:
+          instance: 'client-pc'
+          device_type: 'client'
+          zone: 'lan'
+
+      - targets: ['172.20.20.31:9100']
+        labels:
+          instance: 'branch-client'
+          device_type: 'client'
+          zone: 'branch'
+
+      - targets: ['172.20.20.41:9100']
+        labels:
+          instance: 'internet-attacker'
+          device_type: 'attacker'
+          zone: 'internet'

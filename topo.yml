@@ -23,7 +23,7 @@ topology:
     # -------------------------------------------------------------------------
     # 1. Core Router (Edge) - FRR, OSPF RID 2.2.2.2
     #    eth1 10.0.1.1/30 (-> FW) | eth2 10.0.12.2/30 | eth3 10.0.13.2/30
-    #    eth4 203.0.113.1/24 (-> Internet)
+    #    eth4 203.0.113.1/24 (-> Internet) | mgmt 172.20.20.11
     # -------------------------------------------------------------------------
     core-router:
       kind: linux
@@ -35,10 +35,13 @@ topology:
         - config/vtysh.conf:/etc/frr/vtysh.conf
       exec:
         - sysctl -w net.ipv4.ip_forward=1
+        - apk add --no-cache -q prometheus-node-exporter
+        - nohup node_exporter >/dev/null 2>&1 &
 
     # -------------------------------------------------------------------------
     # 2. Branch Router - FRR, OSPF RID 1.1.1.1
     #    eth1 172.16.1.1/24 | eth2 10.0.12.1/30 (Primary) | eth3 10.0.13.1/30 (Backup)
+    #    mgmt 172.20.20.12
     # -------------------------------------------------------------------------
     branch-router:
       kind: linux
@@ -50,10 +53,13 @@ topology:
         - config/vtysh.conf:/etc/frr/vtysh.conf
       exec:
         - sysctl -w net.ipv4.ip_forward=1
+        - apk add --no-cache -q prometheus-node-exporter
+        - nohup node_exporter >/dev/null 2>&1 &
 
     # -------------------------------------------------------------------------
     # 3. Firewall - Linux + iptables
     #    eth1 10.0.1.2/30 (outside) | eth2 192.168.10.1/24 (inside, gateway LAN)
+    #    mgmt 172.20.20.13
     # -------------------------------------------------------------------------
     firewall:
       kind: linux
@@ -61,7 +67,7 @@ topology:
       mgmt-ipv4: 172.20.20.13
       cmd: sleep infinity
       exec:
-        - apk add --no-cache -q iptables tcpdump
+        - apk add --no-cache -q iptables tcpdump prometheus-node-exporter
         - sysctl -w net.ipv4.ip_forward=1
         - ip addr add 10.0.1.2/30 dev eth1
         - ip addr add 192.168.10.1/24 dev eth2
@@ -70,6 +76,7 @@ topology:
         - ip route replace 172.16.1.0/24 via 10.0.1.1
         - ip route replace 10.0.0.0/16 via 10.0.1.1
         - ip route replace 203.0.113.0/24 via 10.0.1.1
+        - nohup node_exporter >/dev/null 2>&1 &
 
     # -------------------------------------------------------------------------
     # 4. LAN Switch - Linux bridge trên host (scripts/deploy.sh tạo trước)
@@ -79,39 +86,24 @@ topology:
 
     # -------------------------------------------------------------------------
     # 5. Service Server - Nginx (MỤC TIÊU bị tấn công)
-    #    eth1 192.168.10.10/24, GW 192.168.10.1
+    #    eth1 192.168.10.10/24, GW 192.168.10.1 | mgmt 172.20.20.21
     # -------------------------------------------------------------------------
     service-server:
       kind: linux
       image: nginx:alpine
       mgmt-ipv4: 172.20.20.21
       exec:
+        - apk add --no-cache -q prometheus-node-exporter
         - ip addr add 192.168.10.10/24 dev eth1
         - ip link set dev eth1 up
         - ip route replace 172.16.0.0/16 via 192.168.10.1
         - ip route replace 10.0.0.0/16 via 192.168.10.1
         - ip route replace 203.0.113.0/24 via 192.168.10.1
+        - nohup node_exporter >/dev/null 2>&1 &
 
     # -------------------------------------------------------------------------
-    # 6. AIOps Server - Bộ não giám sát & AI (Prometheus/Grafana sẽ bổ sung)
-    #    eth1 192.168.10.20/24 | mgmt 172.20.20.22 (dùng để scrape metric)
-    # -------------------------------------------------------------------------
-    aiops-server:
-      kind: linux
-      image: alpine:latest
-      mgmt-ipv4: 172.20.20.22
-      cmd: sleep infinity
-      exec:
-        - apk add --no-cache -q curl
-        - ip addr add 192.168.10.20/24 dev eth1
-        - ip link set dev eth1 up
-        - ip route replace 172.16.0.0/16 via 192.168.10.1
-        - ip route replace 10.0.0.0/16 via 192.168.10.1
-        - ip route replace 203.0.113.0/24 via 192.168.10.1
-
-    # -------------------------------------------------------------------------
-    # 7. Client PC - Người dùng nội bộ / ATTACKER NỘI BỘ (insider, lateral)
-    #    eth1 192.168.10.30/24
+    # 6. Client PC - Người dùng nội bộ / ATTACKER NỘI BỘ (insider, lateral)
+    #    eth1 192.168.10.30/24 | mgmt 172.20.20.23
     # -------------------------------------------------------------------------
     client-pc:
       kind: linux
@@ -119,17 +111,18 @@ topology:
       mgmt-ipv4: 172.20.20.23
       cmd: sleep infinity
       exec:
-        - apk add --no-cache -q curl iperf3 nmap
+        - apk add --no-cache -q curl iperf3 nmap prometheus-node-exporter
         - apk add --no-cache -q hping3 --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing
         - ip addr add 192.168.10.30/24 dev eth1
         - ip link set dev eth1 up
         - ip route replace 172.16.0.0/16 via 192.168.10.1
         - ip route replace 10.0.0.0/16 via 192.168.10.1
         - ip route replace 203.0.113.0/24 via 192.168.10.1
+        - nohup node_exporter >/dev/null 2>&1 &
 
     # -------------------------------------------------------------------------
-    # 8. Branch Client - Tải bình thường / ATTACKER CHI NHÁNH (compromised host)
-    #    eth1 172.16.1.10/24, GW 172.16.1.1
+    # 7. Branch Client - Tải bình thường / ATTACKER CHI NHÁNH (compromised host)
+    #    eth1 172.16.1.10/24, GW 172.16.1.1 | mgmt 172.20.20.31
     # -------------------------------------------------------------------------
     branch-client:
       kind: linux
@@ -137,17 +130,18 @@ topology:
       mgmt-ipv4: 172.20.20.31
       cmd: sleep infinity
       exec:
-        - apk add --no-cache -q curl iperf3 nmap
+        - apk add --no-cache -q curl iperf3 nmap prometheus-node-exporter
         - apk add --no-cache -q hping3 --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing
         - ip addr add 172.16.1.10/24 dev eth1
         - ip link set dev eth1 up
         - ip route replace 192.168.10.0/24 via 172.16.1.1
         - ip route replace 10.0.0.0/16 via 172.16.1.1
         - ip route replace 203.0.113.0/24 via 172.16.1.1
+        - nohup node_exporter >/dev/null 2>&1 &
 
     # -------------------------------------------------------------------------
-    # 9. Internet Attacker - Mô phỏng "Net" / tấn công TỪ BÊN NGOÀI
-    #    eth1 203.0.113.10/24, GW 203.0.113.1 (Core eth4)
+    # 8. Internet Attacker - Mô phỏng "Net" / tấn công TỪ BÊN NGOÀI
+    #    eth1 203.0.113.10/24, GW 203.0.113.1 (Core eth4) | mgmt 172.20.20.41
     # -------------------------------------------------------------------------
     internet-attacker:
       kind: linux
@@ -155,13 +149,69 @@ topology:
       mgmt-ipv4: 172.20.20.41
       cmd: sleep infinity
       exec:
-        - apk add --no-cache -q curl iperf3 nmap
+        - apk add --no-cache -q curl iperf3 nmap prometheus-node-exporter
         - apk add --no-cache -q hping3 --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing
         - ip addr add 203.0.113.10/24 dev eth1
         - ip link set dev eth1 up
         - ip route replace 192.168.10.0/24 via 203.0.113.1
         - ip route replace 172.16.0.0/16 via 203.0.113.1
         - ip route replace 10.0.0.0/16 via 203.0.113.1
+        - nohup node_exporter >/dev/null 2>&1 &
+
+    # =========================================================================
+    # CỤM GIÁM SÁT AIOPS (GIAI ĐOẠN 2) - NỐI MẠNG OOB (172.20.20.0/24)
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # 9. Prometheus - Thu thập & Lưu trữ Time-series Metrics (Cổng 9090)
+    # -------------------------------------------------------------------------
+    prometheus:
+      kind: linux
+      image: prom/prometheus:latest
+      mgmt-ipv4: 172.20.20.51
+      ports:
+        - 9090:9090
+      binds:
+        - monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+        - monitoring/prometheus/rules:/etc/prometheus/rules
+      cmd: >-
+        --config.file=/etc/prometheus/prometheus.yml
+        --storage.tsdb.path=/prometheus
+        --web.console.libraries=/usr/share/prometheus/console_libraries
+        --web.console.templates=/usr/share/prometheus/consoles
+        --web.enable-lifecycle
+
+    # -------------------------------------------------------------------------
+    # 10. Alertmanager - Quản lý Cảnh báo & Webhook phản ứng (Cổng 9093)
+    # -------------------------------------------------------------------------
+    alertmanager:
+      kind: linux
+      image: prom/alertmanager:latest
+      mgmt-ipv4: 172.20.20.52
+      ports:
+        - 9093:9093
+      binds:
+        - monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml
+      cmd: >-
+        --config.file=/etc/alertmanager/alertmanager.yml
+        --storage.path=/alertmanager
+
+    # -------------------------------------------------------------------------
+    # 11. Grafana - Trực quan hoá & Dashboard AIOps (Cổng 3000)
+    # -------------------------------------------------------------------------
+    grafana:
+      kind: linux
+      image: grafana/grafana:latest
+      mgmt-ipv4: 172.20.20.53
+      ports:
+        - 3000:3000
+      env:
+        GF_SECURITY_ADMIN_USER: admin
+        GF_SECURITY_ADMIN_PASSWORD: admin
+        GF_USERS_ALLOW_SIGN_UP: "false"
+      binds:
+        - monitoring/grafana/provisioning:/etc/grafana/provisioning
+        - monitoring/grafana/dashboards:/var/lib/grafana/dashboards
 
   links:
     # Chi nhánh: Branch Client <-> Branch Router            (172.16.1.0/24)
@@ -183,4 +233,3 @@ topology:
     # Các thiết bị trong LAN
     - endpoints: ["service-server:eth1", "lan-switch:eth2"]
     - endpoints: ["client-pc:eth1", "lan-switch:eth3"]
-    - endpoints: ["aiops-server:eth1", "lan-switch:eth4"]

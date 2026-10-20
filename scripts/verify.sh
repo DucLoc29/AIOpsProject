@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Kiểm tra end-to-end AIOps lab: OSPF, định tuyến, ping, HTTP, công cụ.
+# Kiểm tra end-to-end AIOps lab: OSPF, định tuyến, ping, HTTP, công cụ và giám sát (Prometheus/Grafana).
 cd "$(dirname "$0")/.."
 P=clab-aiops-prod
 PASS=0; FAIL=0
@@ -25,7 +25,6 @@ sudo docker exec $P-branch-router vtysh -c "show ip route 203.0.113.0/24" 2>/dev
 echo "== 3. Kết nối chi nhánh"
 ping_test branch-client 172.16.1.1     "Gateway chi nhánh"
 ping_test branch-client 192.168.10.10  "Chi nhánh -> Service Server"
-ping_test branch-client 192.168.10.20  "Chi nhánh -> AIOps Server"
 
 echo "== 4. Kết nối Internet"
 ping_test internet-attacker 203.0.113.1    "Gateway Internet"
@@ -42,16 +41,38 @@ for n in branch-client internet-attacker client-pc; do
   dx $n "curl -sf -m3 http://192.168.10.10" && ok "HTTP từ $n" || bad "HTTP từ $n"
 done
 
-echo "== 7. Mạng quản lý OOB (AIOps -> các node qua 172.20.20.0/24)"
-for ip in 11 12 13 21 23 31 41; do
-  dx aiops-server "ping -c1 -W1 172.20.20.$ip" && ok "OOB 172.20.20.$ip" || bad "OOB 172.20.20.$ip"
+echo "== 7. Mạng quản lý OOB (Prometheus -> các node qua 172.20.20.0/24)"
+for ip in 11 12 13 21 23 31 41 52 53; do
+  sudo docker exec $P-prometheus wget -q --spider --timeout=1 http://172.20.20.$ip:9100/metrics 2>/dev/null \
+    || sudo docker exec $P-prometheus ping -c1 -W1 172.20.20.$ip >/dev/null 2>&1 \
+    && ok "OOB 172.20.20.$ip reachable" || bad "OOB 172.20.20.$ip unreachable"
 done
 
-echo "== 8. Công cụ"
+echo "== 8. Công cụ kiểm thử bảo mật"
 dx firewall "iptables -L -n" && ok "iptables trên firewall" || bad "iptables trên firewall"
 for n in branch-client client-pc internet-attacker; do
   dx $n "which hping3 && which nmap && which iperf3" && ok "hping3/nmap/iperf3 trên $n" || bad "Thiếu công cụ trên $n"
 done
+
+echo "== 9. Giám sát & AIOps Pipeline (Prometheus, Alertmanager, Grafana)"
+# Kiểm tra Prometheus ready
+sudo docker exec $P-prometheus wget -qO- http://127.0.0.1:9090/-/ready >/dev/null 2>&1 \
+  && ok "Prometheus server ready" || bad "Prometheus server chưa sẵn sàng"
+
+# Kiểm tra Alertmanager ready
+sudo docker exec $P-alertmanager wget -qO- http://127.0.0.1:9093/-/ready >/dev/null 2>&1 \
+  && ok "Alertmanager server ready" || bad "Alertmanager server chưa sẵn sàng"
+
+# Kiểm tra Grafana API health
+sudo docker exec $P-grafana wget -qO- http://127.0.0.1:3000/api/health 2>/dev/null | grep -q "ok" \
+  && ok "Grafana server healthy" || bad "Grafana server chưa sẵn sàng"
+
+# Kiểm tra node_exporter trên các node (scrape status từ Prometheus API)
+ACTIVE_TARGETS=$(sudo docker exec $P-prometheus wget -qO- http://127.0.0.1:9090/api/v1/targets 2>/dev/null \
+  | grep -o '"health":"up"' | wc -l)
+[ "$ACTIVE_TARGETS" -ge 7 ] \
+  && ok "Prometheus scrape targets active ($ACTIVE_TARGETS targets UP)" \
+  || bad "Prometheus scrape targets: chỉ có $ACTIVE_TARGETS targets UP"
 
 echo
 echo "Kết quả: $PASS PASS / $FAIL FAIL"

@@ -21,6 +21,7 @@ sudo containerlab deploy -t topo.yml --reconfigure "$@"
 
 # 4. FRR đổi owner file cấu hình khi chạy -> trả lại quyền đọc cho user
 sudo chmod 644 config/* || true
+sudo chmod -R 755 monitoring/ || true
 
 echo
 echo "[✓] Deploy xong. Kiểm tra kết nối: ./scripts/verify.sh"

@@ -1,0 +1,55 @@
+# =============================================================================
+#  Prometheus Alert Rules - AIOps Lab
+# =============================================================================
+groups:
+  - name: network_infrastructure_alerts
+    rules:
+      # 1. Cảnh báo node mất kết nối (down)
+      - alert: HostDown
+        expr: up == 0
+        for: 15s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Host {{ $labels.instance }} bị mất kết nối"
+          description: "Target {{ $labels.instance }} ({{ $labels.device_type }}) không phản hồi Prometheus qua mạng OOB."
+
+      # 2. Cảnh báo link WAN bị đứt (WAN1: eth2, WAN2: eth3)
+      - alert: WANLinkDown
+        expr: node_network_up{device=~"eth[23]", instance=~".*router.*"} == 0
+        for: 10s
+        labels:
+          severity: high
+        annotations:
+          summary: "Cổng WAN {{ $labels.device }} trên {{ $labels.instance }} bị DOWN"
+          description: "Interface {{ $labels.device }} trên router {{ $labels.instance }} không ở trạng thái UP."
+
+      # 3. Cảnh báo lưu lượng gói tin tăng đột biến (dấu hiệu DoS/DDoS)
+      - alert: HighPacketRate
+        expr: sum by (instance, device) (rate(node_network_receive_packets_total{device!~"lo|eth0"}[15s])) > 1500
+        for: 10s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Lưu lượng gói tin bất thường trên {{ $labels.instance }}:{{ $labels.device }}"
+          description: "Số gói tin nhận vào đạt {{ $value | printf \"%.0f\" }} pkts/s (> 1500 pkts/s)."
+
+      # 4. Cảnh báo mất gói / rớt gói (Drop rate cao)
+      - alert: HighPacketDropRate
+        expr: sum by (instance, device) (rate(node_network_receive_drop_total{device!~"lo|eth0"}[15s])) > 10
+        for: 10s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rớt gói tin trên {{ $labels.instance }}:{{ $labels.device }}"
+          description: "Tỷ lệ rớt gói tin đạt {{ $value | printf \"%.1f\" }} drops/s (> 10 drops/s)."
+
+      # 5. Cảnh báo CPU quá tải
+      - alert: HighCpuUsage
+        expr: 100 - (avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[30s])) * 100) > 85
+        for: 20s
+        labels:
+          severity: warning
+        annotations:
+          summary: "CPU sử dụng cao trên {{ $labels.instance }}"
+          description: "Tải CPU của {{ $labels.instance }} vượt ngưỡng 85% (hiện tại: {{ $value | printf \"%.1f\" }}%)."

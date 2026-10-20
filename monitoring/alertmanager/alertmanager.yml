@@ -1,0 +1,27 @@
+# =============================================================================
+#  Alertmanager Configuration - AIOps Lab
+# =============================================================================
+global:
+  resolve_timeout: 1m
+
+route:
+  group_by: ['alertname', 'instance', 'severity']
+  group_wait: 5s
+  group_interval: 10s
+  repeat_interval: 1h
+  receiver: 'default-receiver'
+  routes:
+    - match_re:
+        severity: critical|high|warning
+      receiver: 'auto-responder-webhook'
+      continue: true
+
+receivers:
+  - name: 'default-receiver'
+
+  # Webhook chuẩn bị cho Auto-Responder (Giai đoạn 5)
+  - name: 'auto-responder-webhook'
+    webhook_configs:
+      - url: 'http://172.20.20.55:5000/alerts'
+        send_resolved: true
+        max_alerts: 10
