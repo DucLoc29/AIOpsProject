@@ -48,8 +48,16 @@ for n in branch-client internet-attacker client-pc; do
   dx $n "curl -sf -m3 http://192.168.10.10" && ok "HTTP từ $n" || bad "HTTP từ $n"
 done
 
+echo "== 6b. Ứng dụng 3 tầng (Nginx -> Flask API -> PostgreSQL) & SSH"
+for n in branch-client internet-attacker client-pc; do
+  dx $n "curl -sf -m5 http://192.168.10.10/api/employees | grep -q Nhan" \
+    && ok "API+DB qua Nginx từ $n" || bad "API+DB qua Nginx từ $n"
+done
+dx internet-attacker "nmap -p22 -Pn 192.168.10.10 | grep -q '22/tcp open'" \
+  && ok "SSH (22/tcp) mở trên service-server" || bad "SSH (22/tcp) không mở"
+
 echo "== 7. Mạng quản lý OOB (Prometheus scrape qua 172.20.20.0/24)"
-for ip in 11 12 13 21 23 31 41; do
+for ip in 11 12 13 21 22 23 24 31 41; do
   $DKR exec $P-prometheus wget -q --spider -T2 http://172.20.20.$ip:9100/metrics >/dev/null 2>&1 \
     && ok "OOB Node 172.20.20.$ip exporter online" || bad "OOB Node 172.20.20.$ip exporter offline"
 done

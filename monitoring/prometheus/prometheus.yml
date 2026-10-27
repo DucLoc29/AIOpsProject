@@ -59,6 +59,18 @@ scrape_configs:
           device_type: 'server'
           zone: 'lan'
 
+      - targets: ['172.20.20.22:9100']
+        labels:
+          instance: 'db-server'
+          device_type: 'server'
+          zone: 'lan'
+
+      - targets: ['172.20.20.24:9100']
+        labels:
+          instance: 'app-server'
+          device_type: 'server'
+          zone: 'lan'
+
       - targets: ['172.20.20.23:9100']
         labels:
           instance: 'client-pc'
@@ -76,3 +88,24 @@ scrape_configs:
           instance: 'internet-attacker'
           device_type: 'attacker'
           zone: 'internet'
+
+  # 4. Nginx application metrics (nginx-prometheus-exporter qua OOB)
+  - job_name: 'nginx'
+    static_configs:
+      - targets: ['172.20.20.54:9113']
+        labels:
+          instance: 'service-server'
+          device_type: 'server'
+          zone: 'lan'
+          service: 'web'
+
+  # 5. Flask API metrics (độ trễ, tỷ lệ lỗi, lỗi DB) - tầng ứng dụng
+  - job_name: 'api'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['172.20.20.24:5000']
+        labels:
+          instance: 'app-server'
+          device_type: 'server'
+          zone: 'lan'
+          service: 'api'

@@ -85,20 +85,79 @@ topology:
       kind: bridge
 
     # -------------------------------------------------------------------------
-    # 5. Service Server - Nginx (MỤC TIÊU bị tấn công)
+    # 5. Service Server - Nginx Web (80) + SSH (22) (MỤC TIÊU bị tấn công)
     #    eth1 192.168.10.10/24, GW 192.168.10.1 | mgmt 172.20.20.21
+    #    Exporter: node 9100, nginx 9113 (qua OOB)
     # -------------------------------------------------------------------------
     service-server:
       kind: linux
       image: nginx:alpine
       mgmt-ipv4: 172.20.20.21
+      binds:
+        - app/nginx.conf:/etc/nginx/conf.d/default.conf
+        - app/html:/usr/share/nginx/html
       exec:
-        - apk add --no-cache -q prometheus-node-exporter
+        - sh -c "echo 'nameserver 8.8.8.8' > /etc/resolv.conf"
+        - apk add --no-cache -q prometheus-node-exporter openssh
+        - sh -c "nohup node_exporter >/dev/null 2>&1 &"
+        - ssh-keygen -A
+        - adduser -D -s /bin/sh opsadmin
+        - sh -c "echo 'opsadmin:Corp@2026' | chpasswd"
+        - sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+        - sed -i 's/^#\?LogLevel.*/LogLevel VERBOSE/' /etc/ssh/sshd_config
+        - /usr/sbin/sshd
         - ip addr add 192.168.10.10/24 dev eth1
         - ip link set dev eth1 up
         - ip route replace 172.16.0.0/16 via 192.168.10.1
         - ip route replace 10.0.0.0/16 via 192.168.10.1
         - ip route replace 203.0.113.0/24 via 192.168.10.1
+        - sh -c "nohup node_exporter >/dev/null 2>&1 &"
+
+    # -------------------------------------------------------------------------
+    # 5b. App Server - Flask API (5000), tầng ứng dụng
+    #     eth1 192.168.10.20/24 | mgmt 172.20.20.24
+    # -------------------------------------------------------------------------
+    app-server:
+      kind: linux
+      image: python:3.12-alpine
+      mgmt-ipv4: 172.20.20.24
+      binds:
+        - app/api:/opt/api
+      cmd: sleep infinity
+      exec:
+        - sh -c "echo 'nameserver 8.8.8.8' > /etc/resolv.conf"
+        - ip addr add 192.168.10.20/24 dev eth1
+        - ip link set dev eth1 up
+        - ip route replace 172.16.0.0/16 via 192.168.10.1
+        - ip route replace 10.0.0.0/16 via 192.168.10.1
+        - ip route replace 203.0.113.0/24 via 192.168.10.1
+        - apk add --no-cache -q prometheus-node-exporter
+        - sh -c "nohup node_exporter >/dev/null 2>&1 &"
+        - pip install -q --no-cache-dir flask psycopg2-binary prometheus-client
+        - sh -c "cd /opt/api && nohup python app.py >/var/log/api.log 2>&1 &"
+
+    # -------------------------------------------------------------------------
+    # 5c. DB Server - PostgreSQL (5432), tầng dữ liệu
+    #     eth1 192.168.10.21/24 | mgmt 172.20.20.22
+    # -------------------------------------------------------------------------
+    db-server:
+      kind: linux
+      image: postgres:16-alpine
+      mgmt-ipv4: 172.20.20.22
+      env:
+        POSTGRES_USER: corp
+        POSTGRES_PASSWORD: corp_pass
+        POSTGRES_DB: corp
+      binds:
+        - app/db/init.sql:/docker-entrypoint-initdb.d/init.sql
+      exec:
+        - sh -c "echo 'nameserver 8.8.8.8' > /etc/resolv.conf"
+        - ip addr add 192.168.10.21/24 dev eth1
+        - ip link set dev eth1 up
+        - ip route replace 172.16.0.0/16 via 192.168.10.1
+        - ip route replace 10.0.0.0/16 via 192.168.10.1
+        - ip route replace 203.0.113.0/24 via 192.168.10.1
+        - apk add --no-cache -q prometheus-node-exporter
         - sh -c "nohup node_exporter >/dev/null 2>&1 &"
 
     # -------------------------------------------------------------------------
@@ -149,7 +208,8 @@ topology:
       mgmt-ipv4: 172.20.20.41
       cmd: sleep infinity
       exec:
-        - apk add --no-cache -q curl iperf3 nmap prometheus-node-exporter
+        - sh -c "echo 'nameserver 8.8.8.8' > /etc/resolv.conf"
+        - apk add --no-cache -q curl iperf3 nmap openssh-client sshpass prometheus-node-exporter
         - apk add --no-cache -q hping3 --repository=https://dl-cdn.alpinelinux.org/alpine/edge/testing
         - ip addr add 203.0.113.10/24 dev eth1
         - ip link set dev eth1 up
@@ -180,6 +240,15 @@ topology:
         --web.console.libraries=/usr/share/prometheus/console_libraries
         --web.console.templates=/usr/share/prometheus/consoles
         --web.enable-lifecycle
+
+    # -------------------------------------------------------------------------
+    # 9b. Nginx Exporter - Chuyển /stub_status của service-server thành metrics (9113)
+    # -------------------------------------------------------------------------
+    nginx-exporter:
+      kind: linux
+      image: nginx/nginx-prometheus-exporter:latest
+      mgmt-ipv4: 172.20.20.54
+      cmd: --nginx.scrape-uri=http://172.20.20.21/stub_status
 
     # -------------------------------------------------------------------------
     # 10. Alertmanager - Quản lý Cảnh báo & Webhook phản ứng (Cổng 9093)
@@ -233,3 +302,5 @@ topology:
     # Các thiết bị trong LAN
     - endpoints: ["service-server:eth1", "lan-switch:eth2"]
     - endpoints: ["client-pc:eth1", "lan-switch:eth3"]
+    - endpoints: ["app-server:eth1", "lan-switch:eth4"]
+    - endpoints: ["db-server:eth1", "lan-switch:eth5"]

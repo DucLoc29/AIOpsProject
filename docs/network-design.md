@@ -19,7 +19,9 @@ flowchart TB
         FW["<b>firewall</b> (Linux + iptables)<br/>mgmt: 172.20.20.13"]
         SW{{"<b>lan-switch</b><br/>Linux bridge"}}
         subgraph LAN["LAN nội bộ — 192.168.10.0/24 — GW 192.168.10.1"]
-            SS["<b>service-server</b> (Nginx)<br/>eth1: 192.168.10.10<br/>mgmt: 172.20.20.21<br/>🎯 Mục tiêu bị tấn công"]
+            SS["<b>service-server</b> (Nginx :80 + SSH :22)<br/>eth1: 192.168.10.10<br/>mgmt: 172.20.20.21<br/>🎯 Mục tiêu bị tấn công"]
+            APP["<b>app-server</b> (Flask API :5000)<br/>eth1: 192.168.10.20<br/>mgmt: 172.20.20.24"]
+            DB[("<b>db-server</b> (PostgreSQL :5432)<br/>eth1: 192.168.10.21<br/>mgmt: 172.20.20.22")]
             PC["<b>client-pc</b><br/>eth1: 192.168.10.30<br/>mgmt: 172.20.20.23<br/>⚔ Attacker nội bộ"]
         end
     end
@@ -34,6 +36,10 @@ flowchart TB
     FW -- "eth2 ↔ eth1<br/>192.168.10.1 (inside)" --- SW
     SW -- "eth2" --- SS
     SW -- "eth3" --- PC
+    SW -- "eth4" --- APP
+    SW -- "eth5" --- DB
+    SS -. "proxy /api/" .-> APP
+    APP -. "SQL 5432" .-> DB
     BR == "WAN1 PRIMARY · eth2 ↔ eth2<br/>10.0.12.0/30 · .1 ↔ .2 · cost 10" === CR
     BR -. "WAN2 BACKUP · eth3 ↔ eth3<br/>10.0.13.0/30 · .1 ↔ .2 · cost 50" .- CR
     BC -- "eth1 ↔ eth1<br/>.10 ↔ .1" --- BR
@@ -47,6 +53,7 @@ flowchart LR
         PROM["<b>prometheus</b><br/>172.20.20.51:9090"]
         AM["<b>alertmanager</b><br/>172.20.20.52:9093"]
         GRAF["<b>grafana</b><br/>172.20.20.53:3000"]
+        NGX["<b>nginx-exporter</b><br/>172.20.20.54:9113"]
     end
 
     M(("OOB MGMT<br/>172.20.20.0/24<br/>eth0"))
@@ -59,6 +66,9 @@ flowchart LR
     M -.-> BR["branch-router .12:9100"]
     M -.-> FW["firewall .13:9100"]
     M -.-> SS["service-server .21:9100"]
+    M -.-> DBN["db-server .22:9100"]
+    M -.-> APN["app-server .24:9100 + API :5000/metrics"]
+    NGX === M
     M -.-> PC["client-pc .23:9100"]
     M -.-> BC["branch-client .31:9100"]
     M -.-> ATK["internet-attacker .41:9100"]
@@ -118,11 +128,15 @@ Route tĩnh: `172.16.1.0/24`, `10.0.0.0/16` và `203.0.113.0/24` đều đi qua 
 | eth1 | firewall eth2 |
 | eth2 | service-server eth1 |
 | eth3 | client-pc eth1 |
+| eth4 | app-server eth1 |
+| eth5 | db-server eth1 |
 
 ### 3.5 Các host dữ liệu & Attacker
 | Node | Data IP (eth1) | Gateway dữ liệu | Mgmt IP (eth0) | Vai trò |
 |---|---|---|---|---|
-| service-server | 192.168.10.10/24 | 192.168.10.1 | 172.20.20.21 | 🎯 Web server Nginx, mục tiêu tấn công |
+| service-server | 192.168.10.10/24 | 192.168.10.1 | 172.20.20.21 | 🎯 Nginx (web + reverse proxy `/api/`) + SSH, mục tiêu tấn công. Dịch vụ nhẹ sau này (DNS...) gộp vào node này |
+| app-server | 192.168.10.20/24 | 192.168.10.1 | 172.20.20.24 | Flask API :5000, xuất metrics `/metrics` |
+| db-server | 192.168.10.21/24 | 192.168.10.1 | 172.20.20.22 | PostgreSQL 16 :5432 (db `corp`) |
 | client-pc | 192.168.10.30/24 | 192.168.10.1 | 172.20.20.23 | 👤 Người dùng LAN / ⚔ attacker nội bộ |
 | branch-client | 172.16.1.10/24 | 172.16.1.1 | 172.20.20.31 | 👤 Sinh tải / ⚔ attacker chi nhánh |
 | internet-attacker | 203.0.113.10/24 | 203.0.113.1 | 172.20.20.41 | ⚔ Attacker từ Internet |
@@ -133,6 +147,10 @@ Route tĩnh: `172.16.1.0/24`, `10.0.0.0/16` và `203.0.113.0/24` đều đi qua 
 | prometheus | prom/prometheus:latest | 172.20.20.51 | 9090 | Thu thập time-series metrics mỗi 5s, đánh giá alert rules |
 | alertmanager | prom/alertmanager:latest | 172.20.20.52 | 9093 | Gom nhóm cảnh báo, định tuyến webhook tự động phản ứng |
 | grafana | grafana/grafana:latest | 172.20.20.53 | 3000 | Dashboard trực quan hóa băng thông WAN, CPU, rớt gói, tấn công |
+| nginx-exporter | nginx/nginx-prometheus-exporter | 172.20.20.54 | 9113 | Đọc `/stub_status` của service-server, xuất metrics Nginx |
+
+### 3.7 Kiến trúc ứng dụng 3 tầng
+`client → service-server (Nginx) → app-server (Flask) → db-server (PostgreSQL)`. Mỗi tầng xuất metrics riêng (Nginx: stub_status; API: độ trễ, tỷ lệ lỗi, lỗi DB; DB: node_exporter), nên sự cố ở tầng dưới thể hiện được sự lan truyền lên tầng trên.
 
 ---
 
