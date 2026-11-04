@@ -21,19 +21,24 @@ cleanup() {
 }
 trap cleanup INT TERM EXIT
 
-# 1. Chèn delay 200ms (+-20ms) và loss 20% trên cổng WAN1 của branch-router
-echo "  [+] Kích hoạt tc netem delay 200ms loss 20% trên branch-router (eth2)..."
+# 1. Chèn delay 200ms (+-20ms) và loss 20% trên cả 2 đầu link WAN1 (branch-router eth2 & core-router eth2)
+echo "  [+] Kích hoạt tc netem delay 200ms loss 20% trên WAN1 (branch-router:eth2 & core-router:eth2)..."
 docker exec "$P-branch-router" tc qdisc del dev eth2 root 2>/dev/null || true
+docker exec "$P-core-router" tc qdisc del dev eth2 root 2>/dev/null || true
 docker exec "$P-branch-router" tc qdisc add dev eth2 root netem delay 200ms 20ms loss 20%
+docker exec "$P-core-router" tc qdisc add dev eth2 root netem delay 200ms 20ms loss 20%
 
-# 2. Sinh lưu lượng liên tục để Prometheus ghi nhận được tỷ lệ drop và độ trễ cao
-echo "  [+] Sinh ping và HTTP liên tục qua WAN1 trong ${DURATION}s..."
+# 2. Sinh lưu lượng liên tục (HTTP + TCP stream) qua WAN1 để Prometheus ghi nhận rõ rệt TCP Retransmissions và suy hao
+echo "  [+] Sinh lưu lượng ứng dụng & TCP qua WAN1 trong ${DURATION}s..."
 STOP=0
 (
   while [ "$STOP" -eq 0 ]; do
-    docker exec "$P-branch-client" ping -c 3 -W 2 10.0.12.2 >/dev/null 2>&1 || true
-    docker exec "$P-branch-client" curl -sf -m5 "http://192.168.10.10/" >/dev/null 2>&1 || true
-    sleep 1
+    for _ in 1 2 3 4 5; do
+      docker exec "$P-branch-client" curl -sf -m3 "http://192.168.10.10/api/employees" >/dev/null 2>&1 &
+      docker exec "$P-branch-client" curl -sf -m3 "http://192.168.10.10/" >/dev/null 2>&1 &
+    done
+    docker exec "$P-branch-client" ping -c 5 -i 0.2 -W 1 192.168.10.10 >/dev/null 2>&1 || true
+    wait 2>/dev/null || true
   done
 ) &
 BG_PID=$!

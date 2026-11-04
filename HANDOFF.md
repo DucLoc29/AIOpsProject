@@ -1,8 +1,8 @@
 # HANDOFF – Dự án AIOps (Đồ án tốt nghiệp)
 
 > File này để **một cửa sổ/agent mới đọc và làm tiếp** mà không cần hỏi lại.
-> Đọc theo thứ tự: mục 1 → 2 → 3 → 5 → 6. Chi tiết IP: [`docs/network-design.md`](docs/network-design.md).
-> Cập nhật lần cuối: 2026-10-20. Ngôn ngữ làm việc với người dùng: **tiếng Việt**.
+> Đọc theo thứ tự: mục 1 → 2 → 3 → 5 → 6 → 7. Chi tiết IP: [`docs/network-design.md`](docs/network-design.md).
+> Cập nhật lần cuối: 2026-11-04. Ngôn ngữ làm việc với người dùng: **tiếng Việt**.
 
 ---
 
@@ -14,63 +14,83 @@
 1. Thiết kế, triển khai mô phỏng topology mạng doanh nghiệp trên môi trường Containerlab / Linux containers.
 2. Xây dựng pipeline thu thập số liệu thời gian thực bằng **Prometheus** và dashboard **Grafana**.
 3. Xây dựng kịch bản mô phỏng các tình huống tấn công, sự cố (suy giảm đường truyền, thiết bị, ứng dụng) để thu thập dữ liệu và gán nhãn.
-4. Huấn luyện và triển khai mô hình AI phân tích dữ liệu mạng để phát hiện sớm bất thường (*Isolation Forest / LSTM-AE*) và phân loại sự cố (*Random Forest / XGBoost*).
-5. Xây dựng module tự động phản ứng và xử lý sự cố khép kín (*Closed-loop Auto-remediation*).
+4. Huấn luyện và triển khai bộ 3 mô hình AI độc lập để phát hiện bất thường tức thời (**Extended Isolation Forest**), dự báo suy giảm chuỗi thời gian 5 phút (**XGBoost Forecaster**) và phân loại nguyên nhân gốc rễ (**XGBoost Multi-class RCA Classifier**).
+5. Xây dựng Trung tâm Chỉ huy AIOps Web Console & module tự động phản ứng xử lý sự cố khép kín (*Closed-loop Auto-remediation*).
 
 ---
 
-## 2. Môi trường & Triển khai
+## 2. Môi trường & Quy trình Triển khai (Local VM $\rightarrow$ Git $\rightarrow$ Azure VM)
 
 | Mục | Giá trị |
 |---|---|
-| Nền tảng | Ubuntu Linux, Docker 29.x, Containerlab 0.81.x |
-| Thư mục dự án | `/home/dash/Desktop/AIOpsProject` (hoặc `~/aiops-project` trên Azure VM) |
+| Nền tảng | Ubuntu Linux VM (Local & Azure VM đồng nhất hệ điều hành), Docker 29.x, Containerlab 0.81.x |
+| Thư mục dự án | `/home/dash/Desktop/AIOpsProject` (Local VM) $\rightarrow$ `git push` $\rightarrow$ `~/aiops-project` (Azure VM) |
 | Git Repo | `https://github.com/DucLoc29/AIOpsProject.git` (nhánh `main`) |
-| Giao diện quản lý | Grafana: `http://localhost:3000` (admin/admin) · Prometheus: `http://localhost:9090` · Alertmanager: `http://localhost:9093` |
+| Giao diện quản lý | **AIOps Command Center**: `http://localhost:5000` · **Grafana**: `http://localhost:3000` (admin/admin) · **Prometheus**: `http://localhost:9090` · **Alertmanager**: `http://localhost:9093` |
 
-### ⚠ Quy trình khởi động Lab
+### ⚠ Quy trình khởi động Lab & AIOps Dashboard
 Containerlab không tự động lưu trạng thái sau khi máy reboot. Mỗi lần khởi động chạy:
 ```bash
 sudo ./scripts/deploy.sh && sleep 10 && ./scripts/verify.sh
+python3 monitoring/aiops-dashboard/app.py
 ```
 
 ---
 
-## 3. Trạng thái hiện tại: ĐÃ LÀM ĐƯỢC
+## 3. Trạng thái hiện tại: CHI TIẾT NHỮNG GÌ ĐÃ LÀM ĐƯỢC
 
 ### ✅ Giai đoạn 1 – Topology Mạng Doanh Nghiệp: HOÀN THÀNH & KIỂM CHỨNG
-* Mô phỏng mạng doanh nghiệp hoàn chỉnh: Core Router, Branch Router, Firewall, LAN Switch, Web Server, Client LAN, Branch Client, Internet Attacker.
-* OSPF Area 0 trên 2 đường WAN point-to-point: WAN1 Primary (cost 10) và WAN2 Backup (cost 50).
+* Mô phỏng mạng doanh nghiệp hoàn chỉnh: Core Router, Branch Router, Firewall, LAN Switch, Service Server (Web/SSH), App Server (Flask API), DB Server (PostgreSQL), Client PC (LAN), Branch Client, Internet Attacker.
+* OSPF Area 0 trên 2 đường WAN point-to-point: **WAN1 Primary (cost 10)** và **WAN2 Backup (cost 50)**.
 * Định tuyến động OSPF hội tụ cực nhanh (~1s) khi failover. Đạt 26/26 PASS ở GĐ1.
 
-### ✅ Giai đoạn 2 – Pipeline Giám sát Real-time: HOÀN THÀNH & KIỂM CHỨNG (31/31 PASS)
-1. **Phân tách Cụm Giám sát độc lập qua Mạng OOB (`172.20.20.0/24`):**
-   * Gỡ bỏ node tạm thời `aiops-server` khỏi LAN.
-   * Tách thành 3 microservices độc lập: `prometheus` (.51:9090), `alertmanager` (.52:9093), `grafana` (.53:3000) chỉ nối qua `eth0`.
-   * **Lý do kỹ thuật cốt lõi:** Khi Data Plane bị nghẽn hoặc tấn công DoS, kênh OOB vẫn sống sót 100% để thu thập dữ liệu và gửi lệnh phản ứng.
-2. **Triển khai Node Exporter diện rộng:**
-   * Tự động cài đặt và chạy nền `node_exporter` (port 9100) trên toàn bộ 7 node mạng (`core-router`, `branch-router`, `firewall`, `service-server`, `client-pc`, `branch-client`, `internet-attacker`).
-   * Scrape interval 5s cung cấp dữ liệu chuỗi thời gian độ phân giải cao phục vụ AI.
-3. **Cấu hình Prometheus & Alertmanager:**
-   * `monitoring/prometheus/prometheus.yml`: Scrape cấu hình chuẩn kèm nhãn (`zone`, `device_type`, `instance`). Đã xác thực bằng `promtool`.
-   * `monitoring/prometheus/rules/network_alerts.yml`: 5 rules cảnh báo (`HostDown`, `WANLinkDown`, `HighPacketRate`, `HighPacketDropRate`, `HighCpuUsage`).
-   * `monitoring/alertmanager/alertmanager.yml`: Cấu hình route webhook sẵn sàng bắn về Auto-Responder (`http://172.20.20.55:5000/alerts`).
-4. **Grafana Provisioning & Real-time Dashboard:**
-   * Nạp tự động Datasource và Dashboard JSON (`monitoring/grafana/dashboards/network-overview.json`).
-   * Trực quan hóa: Trạng thái node online, so sánh lưu lượng WAN1 (cost 10) vs WAN2 (cost 50), lưu lượng Firewall in/out, lưu lượng web server, tỷ lệ rớt gói (drops/s), tải CPU.
-5. **Cải tiến Scripts & Sửa lỗi vận hành:**
-   * `scripts/deploy.sh`: Tự động dò tìm đường dẫn `containerlab` trong mọi trường hợp (`sudo`, `PATH`, `~/.local/bin/`); cấp quyền `chmod -R 755 monitoring/`.
-   * `scripts/destroy.sh`: Tự động tìm `containerlab` và dọn dẹp sạch sẽ bridge `lan-switch`.
-   * `scripts/verify.sh`: Tự nhận diện `docker` không cần sudo, kiểm tra sức khỏe Prometheus, Alertmanager, Grafana và xác thực toàn bộ scrape targets.
-   * **Kết quả kiểm chứng mới nhất:** Đạt **31/31 PASS** (100% tests thành công).
+### ✅ Giai đoạn 2 – Pipeline Giám sát Real-time qua Mạng OOB: HOÀN THÀNH (31/31 PASS)
+1. **Phân tách Cụm Giám sát & AIOps độc lập qua Mạng OOB (`172.20.20.0/24`):**
+   * Tách cụm giám sát ra mạng quản lý Out-of-Band (`eth0`): `prometheus` (`.51:9090`), `alertmanager` (`.52:9093`), `grafana` (`.53:3000`), `nginx-exporter` (`.54:9113`), và quy hoạch `.55:5000` cho **AIOps Command Center (`monitoring/aiops-dashboard/`)**.
+   * **Lý do kỹ thuật cốt lõi:** Khi Data Plane (`eth1`, `eth2`) bị nghẽn hoặc tấn công DoS, kênh OOB (`eth0`) vẫn sống sót 100% để thu thập dữ liệu và gửi lệnh phản ứng.
+2. **Triển khai Exporters diện rộng (Scrape interval 5s):**
+   * `node_exporter` (:9100) trên toàn bộ các node mạng + `nginx-exporter` (:9113) + `/metrics` trên `app-server` (:5000).
+3. **Cấu hình Prometheus, Alertmanager & Grafana:**
+   * `monitoring/prometheus/prometheus.yml` & `monitoring/prometheus/rules/network_alerts.yml` (5 luật cảnh báo).
+   * `monitoring/alertmanager/alertmanager.yml`: Định tuyến webhook cảnh báo tới `http://172.20.20.55:5000/alerts`.
+   * `monitoring/grafana/dashboards/network-overview.json`: Dashboard trực quan hóa băng thông WAN1 vs WAN2, Firewall, Web Server, CPU.
 
-### ✅ Giai đoạn 3 – Bước 1: Dịch vụ doanh nghiệp (đã cấu hình, chờ xác nhận verify.sh)
-* **Kiến trúc 3 tầng trong LAN:** `service-server` (Nginx :80 reverse proxy `/api/` + SSH :22, user `opsadmin`/`Corp@2026`) → `app-server` (Flask API :5000, `.20`) → `db-server` (PostgreSQL :5432, `.21`, db `corp`).
-* `nginx-exporter` (172.20.20.54:9113) đọc `/stub_status`; Prometheus có thêm job `nginx` và `api` (`app-server:5000/metrics`).
-* Mã nguồn: `app/nginx.conf`, `app/html/`, `app/api/app.py`, `app/db/init.sql`.
-* Quy ước: dịch vụ nhẹ sau này (DNS...) gộp vào `service-server`, không tạo node mới.
-* DNS của Docker host có lúc lỗi nên các node cài gói đặt `nameserver 8.8.8.8` trước `apk add`. `zebra` của core-router thỉnh thoảng crash khi khởi động: chạy lại deploy.
-* **Lưu ý cho kịch bản (Bước 2):** cần cài `iperf3`, `tc` (iproute2-tc), tool HTTP flood; cẩn thận conntrack (kernel host dùng chung).
+### ✅ Giai đoạn 3 – Dịch vụ Doanh nghiệp 3 Tầng, 7 Kịch bản Sự cố & Unified Dataset: HOÀN THÀNH (37/37 PASS)
+* **Kiến trúc 3 tầng trong LAN (`app/`):** `service-server` (`192.168.10.10`, Nginx :80 reverse proxy `/api/` + SSH :22) $\rightarrow$ `app-server` (`192.168.10.20`, Flask API :5000) $\rightarrow$ `db-server` (`192.168.10.21`, PostgreSQL :5432, db `corp`).
+* **Bộ 7 kịch bản (`scripts/scenarios/`):**
+  * `00_normal_traffic.sh`, `01_wan_congestion.sh`, `02_wan_loss_latency.sh` (đã nâng cấp `tc netem` 2 chiều trên WAN1), `03_internet_syn_flood.sh`, `04_insider_port_scan.sh`, `05_ssh_bruteforce.sh`, `06_server_http_flood.sh`.
+* **Pipeline thu thập & Hợp nhất 1 Bộ Dataset Duy nhất (`ai/collector/` & `ai/dataset/`):**
+  * `ai/collector/generate_dataset.py`: Chạy đan xen 2 chu kỳ kịch bản đầy đủ, xuất chuỗi thời gian gốc `ai/dataset/raw_prometheus_timeseries.csv` (**713 mẫu × 46 cột**).
+  * `ai/collector/prepare_two_stage_datasets.py`: Tạo ra **1 file Dataset Hợp nhất duy nhất (`ai/dataset/aiops_network_dataset.csv` - 700 mẫu × 117 cột)** dùng chung cho cả 3 Model (chỉ cần upload 1 file lên Kaggle, mỗi Model tự động chọn tập đặc trưng và nhãn mục tiêu của riêng mình):
+    1. **2 cột định danh thời gian:** `timestamp`, `datetime`.
+    2. **42 cột đặc trưng tức thời đa tầng** (WAN1/WAN2, Firewall, LAN/TCP Stack, Nginx/Flask API/PostgreSQL — trong đó có 14 chỉ số KPI cốt lõi `KEY_TIMESERIES_KPIS`).
+    3. **70 cột đặc trưng cửa sổ trượt (Sliding Window):** Tính trên cửa sổ 5 bước cho 14 KPI cốt lõi (`*_roll_mean`, `*_roll_std`, `*_delta1`, `*_trend_slope`, `*_sustained_ratio`).
+    4. **3 cột nhãn mục tiêu (Targets):** `current_degraded` (`0/1` cho Model 1), `degraded_forecast_5m` (`0/1` cho Model 2), `label` (`7 lớp` cho Model 3).
+
+### ✅ Giai đoạn 4 – Huấn luyện 3 Mô hình AI Độc lập & 3 Kaggle Notebooks (`ai/`): HOÀN THÀNH
+* **Kiến trúc 3 Model độc lập (Three-Stage Cascaded Pipeline) + Separation of Concerns:**
+  1. **Model 1 (`ai/models/model1_eif_detector.pkl`) — Extended Isolation Forest (EIF):**
+     * Tự động chọn **14 đặc trưng KPI cốt lõi tức thời** $\rightarrow$ Target: `current_degraded` (`0/1`).
+     * Sử dụng siêu phẳng cắt nghiêng ngẫu nhiên ($\mathbf{n} \cdot \mathbf{x} \le p$), đạt **`F1 = 0.9848`, `Accuracy = 98.29%`** (vượt trội hơn Standard Isolation Forest `F1 = 0.9652`).
+  2. **Model 2 (`ai/models/model2_xgboost_forecaster.pkl`) — XGBoost 5m Time-Series Forecaster:**
+     * Tự động chọn **84 đặc trưng cửa sổ trượt** (`14 tức thời + 70 cột động học`) $\rightarrow$ Target: `degraded_forecast_5m` (`0/1`).
+     * Đạt **`Recall = 95.96%`, `F1 = 0.9179`, `ROC-AUC = 0.9672`**. Khi gặp gai nhiễu thoáng qua (`TransientSpike`), Model 2 dự báo xác suất kéo dài chỉ `2.58%` (`< 60%`), giúp chặn đứng báo động giả.
+  3. **Hệ thống Điều phối (System Policy Engine):**
+     * Tách biệt hoàn toàn khỏi Model: Chỉ khi `Model 1 == 1` **VÀ** `Model 2 >= Ngưỡng Hệ thống (mặc định 60%)` mới kích hoạt Model 3.
+  4. **Model 3 (`ai/models/model3_rca_classifier.pkl`) — XGBoost Multi-class RCA Classifier (`XGBoost_RCA`):**
+     * Tự động chọn **42 đặc trưng đa tầng tức thời** $\rightarrow$ Target: `label` (`Normal`, `WanCongestion`, `WanLossLatency`, `SynFlood`, `PortScan`, `SshBruteforce`, `HttpFlood`).
+     * Sử dụng **XGBoost (`XGBClassifier`)**, đạt **`Accuracy = 100%`, `Macro-F1 = 1.0000`, `5-Fold CV = 0.9972`**.
+* **Bộ 3 Kaggle Notebooks riêng biệt (`ai/reports/`):**
+  * `ai/reports/Kaggle_Model1_EIF_Instant_Detector.ipynb`
+  * `ai/reports/Kaggle_Model2_XGBoost_5m_Forecaster.ipynb`
+  * `ai/reports/Kaggle_Model3_RCA_Classifier.ipynb`
+
+### ✅ Giai đoạn 5 (Phần 1) – Chuẩn hóa Cấu trúc Thư mục & Giao diện Cơ bản AIOps Command Center (`monitoring/aiops-dashboard/`): ĐÃ KHỞI TẠO
+* Đã gom gọn toàn bộ dự án thành **5 trụ cột thư mục** (`config/`, `app/`, `monitoring/`, `ai/`, `scripts/` & `docs/`).
+* Đã xây dựng phiên bản cơ bản của **Web Trung tâm Chỉ huy AIOps (`monitoring/aiops-dashboard/`)** chạy tại `http://localhost:5000`:
+  * Nạp trực tiếp 3 file model `.pkl` thật và dataset `ai/dataset/aiops_network_dataset.csv`.
+  * Hiển thị trực quan 4 khối Pipeline (`Model 1 EIF` $\rightarrow$ `Model 2 XGBoost 5m` $\rightarrow$ `System Policy Gate` $\rightarrow$ `Model 3 XGBoost RCA`), bảng 42 chỉ số mạng, biểu đồ xác suất 7 lớp và bảng Nhật ký Tự động Ứng phó (`Audit Log`).
+  * Hỗ trợ thanh chọn 8 kịch bản mô phỏng tức thì, thanh trượt chỉnh ngưỡng dự báo (`30%–90%`), công tắc `Auto-Pilot` vs `Human-in-the-Loop`, và nút `Rollback`.
 
 ---
 
@@ -82,113 +102,84 @@ sudo ./scripts/deploy.sh && sleep 10 && ./scripts/verify.sh
 * **Hướng 3 - Nội bộ Attacker (`192.168.10.30`):** Insider threat cùng dải LAN với server, **không đi qua Firewall** $\rightarrow$ Chặn trực tiếp tại **Service Server** (`iptables`).
 
 ### 4.2. Bản chất suy giảm WAN & Giá trị cốt lõi của AIOps
-* **Hạn chế OSPF truyền thống:** Chỉ chuyển đường khi đứt link vật lý (Hard Failure). Khi WAN1 bị "suy giảm mềm" (Soft/Gray Failure: rớt gói 25%, nghẽn băng thông 98%, latency cao), OSPF vẫn giữ cost 10 và **không tự chuyển sang WAN2**, làm gián đoạn người dùng.
-* **Cơ chế AIOps:** Prometheus & AI phát hiện chất lượng WAN1 suy giảm $\rightarrow$ Auto-Responder tự động đổi OSPF cost WAN1 từ 10 lên 100 bằng lệnh `vtysh` $\rightarrow$ OSPF lập tức lái lưu lượng sang WAN2 (cost 50). Khi WAN1 hết nghẽn, AIOps hạ cost về 10.
-
-### 4.3. Ma trận suy giảm hiệu năng toàn diện 3 tầng
-1. **Tầng 1 - Đường truyền (Network Link):** Nghẽn băng thông WAN1 (`iperf3`); Mất gói và Trễ cao (`tc qdisc netem delay 200ms loss 20%`).
-2. **Tầng 2 - Thiết bị mạng (Network Device):** Tràn bảng session/conntrack Firewall (`hping3 --rand-source`).
-3. **Tầng 3 - Ứng dụng & Máy chủ (Server & Application):** Web Server HTTP Flood / Quá tải kết nối (`ab` / `curl` loop), xuất hiện mã lỗi HTTP 502/504.
+* **Hạn chế OSPF truyền thống:** Chỉ chuyển đường khi đứt link vật lý (Hard Failure). Khi WAN1 bị "suy giảm mềm" (Soft/Gray Failure: rớt gói 20%, nghẽn băng thông 98%, delay 200ms), OSPF vẫn giữ cost 10 và **không tự chuyển sang WAN2**, làm gián đoạn người dùng.
+* **Cơ chế AIOps:** Prometheus & Bộ 3 Model AI phát hiện chất lượng WAN1 suy giảm và dự báo kéo dài $\rightarrow$ Auto-Responder tự động đổi OSPF cost WAN1 từ `10` lên `100` bằng lệnh `vtysh` $\rightarrow$ OSPF lập tức lái lưu lượng sang WAN2 (`cost 50`). Khi WAN1 ổn định, AIOps trả cost về `10`.
 
 ---
 
-## 5. Cấu trúc thư mục dự án
+## 5. Cấu trúc thư mục dự án (5 Trụ cột Chuẩn hóa)
 
-```
+```text
 AIOpsProject/
-├── topo.yml                         # Topology Containerlab tích hợp cụm AIOps
-├── config/                          # Cấu hình FRR cho các Router
+├── topo.yml                         # Topology Containerlab tổng thể
+├── config/                          # [1. HẠ TẦNG MẠNG] Cấu hình FRR OSPF cho Core & Branch Router
 │   ├── core-frr.conf
 │   ├── branch-frr.conf
 │   ├── daemons
 │   └── vtysh.conf
-├── monitoring/                      # Pipeline Giám sát (Prometheus & Grafana)
-│   ├── prometheus/
-│   │   ├── prometheus.yml          # Cấu hình scrape OOB (5s interval)
-│   │   └── rules/
-│   │       └── network_alerts.yml  # 5 luật cảnh báo hạ tầng & mạng
-│   ├── alertmanager/
-│   │   └── alertmanager.yml        # Định tuyến webhook tới Auto-Responder
-│   └── grafana/
-│       ├── provisioning/           # Nạp tự động Datasource & Dashboard
-│       └── dashboards/
-│           └── network-overview.json # Dashboard trực quan hóa AIOps
-├── app/                             # [SẼ LÀM Ở GĐ3] Web Portal & Nginx config cho service-server
-│   ├── html/                       # Giao diện Corporate Web Portal
-│   └── nginx.conf                  # Nginx config kích hoạt /stub_status
-├── scripts/
+├── app/                             # [2. SERVER DOANH NGHIỆP - LAN] Web Nginx + Flask API + PostgreSQL DB
+│   ├── html/                        # Giao diện Corporate Web Portal
+│   ├── api/                         # Flask API (:5000) & Prometheus /metrics
+│   ├── db/                          # PostgreSQL init.sql (:5432)
+│   └── nginx.conf                   # Nginx reverse proxy /api/ & /stub_status
+├── monitoring/                      # [3. CỤM SERVER GIÁM SÁT & AIOPS - MẠNG OOB 172.20.20.0/24]
+│   ├── prometheus/                  # Thu thập time-series metrics mỗi 5s (.51:9090)
+│   ├── alertmanager/                # Quản lý cảnh báo & bắn webhook (.52:9093 -> .55:5000/alerts)
+│   ├── grafana/                     # Dashboard trực quan hóa hạ tầng mạng (.53:3000)
+│   └── aiops-dashboard/             # Web Trung tâm Chỉ huy AIOps & Tự động ứng phó (.55:5000)
+│       ├── app.py                   # Backend điều phối 3 Model AI + Policy Engine + API + Webhook
+│       ├── templates/index.html     # Giao diện Web AIOps Command Center
+│       └── static/                  # style.css & dashboard.js
+├── ai/                              # [4. KHỐI DỮ LIỆU & TRÍ TUỆ NHÂN TẠO (3 MODEL ĐỘC LẬP)]
+│   ├── collector/                   # Pipeline thu thập Prometheus & hợp nhất Dataset
+│   │   ├── generate_dataset.py      # Chạy kịch bản, query Prometheus API, xuất CSV gốc
+│   │   └── prepare_two_stage_datasets.py # Hợp nhất 1 file Dataset duy nhất (`aiops_network_dataset.csv`)
+│   ├── dataset/                     # Chứa bộ dataset chuẩn cho Local & Kaggle
+│   │   ├── aiops_network_dataset.csv     # Dataset Hợp nhất duy nhất cho cả 3 Model (700 mẫu x 117 cột)
+│   │   ├── raw_prometheus_timeseries.csv # Dữ liệu chuỗi thời gian Prometheus gốc backup (713 mẫu x 46 cột)
+│   │   └── timeline.json                 # Mốc thời gian thực thi các kịch bản
+│   ├── eif_model.py                 # Thuật toán Extended Isolation Forest (EIF)
+│   ├── train.py                     # Huấn luyện 3 Model độc lập từ `ai/dataset/aiops_network_dataset.csv`
+│   ├── evaluate.py                  # Kiểm thử Hệ thống điều phối 3 Model nối tiếp
+│   ├── models/                      # Lưu model1_eif_detector.pkl, model2_xgboost_forecaster.pkl, model3_rca_classifier.pkl
+│   └── reports/                     # Lưu báo cáo & 3 Kaggle Notebooks riêng biệt cho 3 Model
+│       ├── Kaggle_Model1_EIF_Instant_Detector.ipynb   # Notebook 1: Extended Isolation Forest (14 features -> current_degraded)
+│       ├── Kaggle_Model2_XGBoost_5m_Forecaster.ipynb  # Notebook 2: XGBoost 5m Forecaster (84 features -> degraded_forecast_5m)
+│       ├── Kaggle_Model3_RCA_Classifier.ipynb         # Notebook 3: XGBoost Multi-class RCA (42 features -> label)
+│       └── training_metrics.json                      # Báo cáo kết quả thực nghiệm JSON
+├── scripts/                         # [5. VẬN HÀNH & KỊCH BẢN]
 │   ├── deploy.sh                    # Khởi chạy lab & monitoring
 │   ├── destroy.sh                   # Hủy lab & bridge
-│   ├── verify.sh                    # Kiểm tra end-to-end (31/31 PASS)
+│   ├── verify.sh                    # Kiểm tra end-to-end (37/37 PASS)
 │   ├── test-failover.sh             # Demo WAN failover OSPF
-│   └── scenarios/                   # [ĐÃ HOÀN THÀNH Ở GĐ3] Bộ 7 script kịch bản
-│       ├── 00_normal_traffic.sh     # Sinh lưu lượng bình thường (baseline)
-│       ├── 01_wan_congestion.sh     # Nghẽn băng thông WAN1 (iperf3 từ chi nhánh)
-│       ├── 02_wan_loss_latency.sh   # Chèn suy hao trễ/mất gói tc netem trên WAN1
-│       ├── 03_internet_syn_flood.sh # Tấn công DoS SYN Flood từ Internet
-│       ├── 04_insider_port_scan.sh  # Quét cổng trinh sát nmap từ Insider LAN
-│       ├── 05_ssh_bruteforce.sh     # Dò quét mật khẩu SSH từ Internet
-│       └── 06_server_http_flood.sh  # Quá tải ứng dụng HTTP/API
-├── collector/                       # [SẼ LÀM Ở BƯỚC 3 - GĐ3] Pipeline thu thập & gán nhãn dataset
-│   └── generate_dataset.py          # Orchestrator chạy kịch bản, query API, xuất CSV
-├── dataset/                         # [SẼ LÀM Ở BƯỚC 3 - GĐ3] Chứa file CSV dataset đã gán nhãn
-├── ai/                              # [GIAI ĐOẠN 4] Pipeline huấn luyện Machine Learning
-│   ├── train.py                     # Huấn luyện Isolation Forest & Random Forest/XGBoost
-│   ├── evaluate.py                  # Đánh giá Accuracy, F1-Score, Confusion Matrix
-│   └── models/                      # Nơi lưu các mô hình đã huấn luyện (.pkl / .joblib)
-├── aiops-dashboard/                 # [GIAI ĐOẠN 5] Trung tâm chỉ huy AIOps (Console)
-│   ├── backend/                     # Python FastAPI/Flask (Webhook receiver + AI inference + Remediation)
-│   └── frontend/                    # Web Console (Real-time alert feed, confidence, manual override)
+│   └── scenarios/                   # Bộ 7 script kịch bản sự cố & tấn công
 └── docs/network-design.md           # Thiết kế mạng, sơ đồ Mermaid, bảng IP
 ```
 
 ---
 
-## 6. KẾ HOẠCH HÀNH ĐỘNG TIẾP THEO: GIAI ĐOẠN 3
+## 6. KẾ HOẠCH DỰ KIẾN TIẾP THEO (HOÀN THIỆN GIAI ĐOẠN 5 & DEPLOY AZURE VM)
 
-### ✅ Bước 1: Nâng cấp Dịch vụ Doanh nghiệp trên `service-server` (ĐÃ HOÀN THÀNH)
-* Đã triển khai kiến trúc 3 tầng: Nginx Web + Flask API + PostgreSQL + OpenSSH.
-* Đã cấu hình Nginx reverse proxy `/api/` và bật `/stub_status`.
-* Đã cấu hình node `nginx-exporter` (172.20.20.54:9113) và Prometheus scrape job `nginx`, `api`.
+Mục tiêu cuối cùng là hoàn thiện hệ thống khép kín (**Closed-loop AIOps**) trên máy Ubuntu Local, sau đó `git push` lên GitHub để `git pull` chạy trực tiếp trên **máy ảo Ubuntu Azure** (public Web qua cổng `:5000` và `:3000`). Các hạng mục cụ thể cần làm tiếp:
 
-### ✅ Bước 2: Xây dựng Bộ Script Kịch bản Sự cố & Tấn công (`scripts/scenarios/`) (ĐÃ HOÀN THÀNH)
-* Đã viết và kiểm thử độc lập 7 kịch bản (nhận tham số thời lượng `DURATION`, tự cleanup khi thoát):
-  * `00_normal_traffic.sh`: Sinh lưu lượng hợp lệ từ `client-pc` và `branch-client`.
-  * `01_wan_congestion.sh`: Đẩy tải băng thông kịch trần qua WAN1 bằng `iperf3` từ chi nhánh.
-  * `02_wan_loss_latency.sh`: Chèn delay 200ms và loss 20% trên WAN1 bằng `tc netem`.
-  * `03_internet_syn_flood.sh`: SYN flood tốc độ cao từ `internet-attacker` tới port 80.
-  * `04_insider_port_scan.sh`: Quét cổng do thám từ máy nội bộ `client-pc` (không qua FW).
-  * `05_ssh_bruteforce.sh`: Dò quét mật khẩu SSH liên tục từ `internet-attacker`.
-  * `06_server_http_flood.sh`: Bắn tải HTTP/API đồng thời từ Internet và Chi nhánh.
+### 🔜 Hạng mục 1: Xây dựng Tầng Cơ sở Dữ liệu Bền vững (`monitoring/aiops-dashboard/database.py`)
+* **Thiết kế Hybrid Database (SQLite `aiops.db` Zero-Config + Hỗ trợ đồng bộ `MONGO_URI` MongoDB Atlas Cloud):**
+  1. **Bảng / Collection `incidents`:** Lưu lịch sử từng lần suy luận của 3 Model (`timestamp`, `m1_eif_score`, `m1_degraded`, `m2_prob_5m`, `trigger_m3`, `m3_fault_class`, `m3_confidence`, snapshot thông số mạng).
+  2. **Bảng / Collection `remediation_logs`:** Lưu bền vững nhật ký tự động ứng phó & khôi phục (`time`, `scenario`, `trigger_mode`, `target_node`, `command`, `status`).
+  3. **Bảng / Collection `system_policy`:** Lưu cấu hình ngưỡng dự báo 5m (`forecast_threshold`), chế độ `auto_pilot`, đường truyền WAN hiện hành và danh sách IP đang bị chặn để không bị mất khi khởi động lại server.
 
-### Bước 3: Xây dựng Pipeline Thu thập & Gán nhãn Dataset (`collector/`)
-* Xây dựng script Python `collector/generate_dataset.py`:
-  1. Chỉ huy chạy đan xen có kiểm soát: `Traffic sạch (2 phút)` $\rightarrow$ `Sự cố 1 (1 phút)` $\rightarrow$ `Traffic sạch` $\rightarrow$ `Sự cố 2` $\rightarrow$ ...
-  2. Tự động ghi lại chính xác mốc thời gian bắt đầu và kết thúc của từng sự cố.
-  3. Gọi REST API của Prometheus (`/api/v1/query_range`) để trích xuất toàn bộ metrics mạng và hệ thống.
-  4. Khớp nhãn nhị phân (`is_anomaly`: 0 hoặc 1) và nhãn đa lớp (`label`: `Normal`, `WanCongestion`, `WanLossLatency`, `SynFlood`, `PortScan`, `SshBruteforce`, `HttpFlood`).
-  5. Xuất tập dữ liệu ra file `dataset/aiops_network_dataset.csv` làm đầu vào sẵn sàng cho Giai đoạn 4.
+### 🔜 Hạng mục 2: Kết nối Luồng Thời gian thực (Live Prometheus Scraping + Real OOB Remediation)
+* Nâng cấp [`monitoring/aiops-dashboard/app.py`](monitoring/aiops-dashboard/app.py) và tách module thực thi `monitoring/aiops-dashboard/remediation.py` để hỗ trợ **2 chế độ hoạt động trên Web**:
+  1. **🧪 Chế độ Mô phỏng (Simulation Replay Mode - Đã có):** Duyệt nhanh qua 8 kịch bản từ dataset để kiểm thử tức thì phản ứng của 3 Model.
+  2. **🔴 Chế độ Thời gian thực (Live Production Mode - Cần bổ sung):**
+     * Cứ mỗi `5s` truy vấn trực tiếp 42 chỉ số tức thời từ Prometheus API (`http://localhost:9090` / `http://172.20.20.51:9090`), duy trì bộ đệm cửa sổ trượt 5 mẫu để tính 70 đặc trưng động học (tổng 84 đặc trưng cho Model 2), và đưa qua 3 Model AI.
+     * **Thực thi lệnh khắc phục thật qua OOB (`docker exec`):**
+       * `WanCongestion` / `WanLossLatency`: Thực thi thật lệnh `vtysh` trên `clab-aiops-prod-core-router` & `clab-aiops-prod-branch-router` đổi `ip ospf cost 100` trên `eth2` (WAN1) để bẻ lái lưu lượng sang WAN2.
+       * `SynFlood` / `SshBruteforce` / `HttpFlood`: Thực thi thật lệnh `iptables` trên `clab-aiops-prod-firewall` chặn IP `203.0.113.10` hoặc giới hạn tốc độ HTTP.
+       * `PortScan`: Thực thi thật lệnh `iptables` trên `clab-aiops-prod-service-server` cô lập máy nội bộ `192.168.10.30`.
+       * **Nút Rollback thật:** Gỡ bỏ các luật `iptables` đã thêm và trả `ip ospf cost 10` cho WAN1 trên Router.
+     * **Bảng Nút Bấm Kích hoạt Kịch bản Thật (Live Scenario Launcher):** Cho phép bấm nút trên Web để chạy nền các script trong `scripts/scenarios/01..06_*.sh` phục vụ demo trực tiếp trước Hội đồng.
 
----
-
-## 7. ĐỊNH HƯỚNG THIẾT KẾ GIAI ĐOẠN 4 & 5 (ĐÃ THỐNG NHẤT)
-
-### 7.1. Giai đoạn 4: Huấn luyện & Xuất mô hình AI (`ai/`)
-* **Dữ liệu đầu vào:** `dataset/aiops_network_dataset.csv`.
-* **Mô hình 1 - Phát hiện bất thường sớm (Unsupervised):** *Isolation Forest* / *LSTM-AE* $\rightarrow$ xuất ra `ai/models/anomaly_detector.pkl`.
-* **Mô hình 2 - Phân loại nguyên nhân sự cố (Supervised Multi-class):** *Random Forest* / *XGBoost* $\rightarrow$ xuất ra `ai/models/fault_classifier.pkl` (7 nhãn tương ứng 7 kịch bản).
-* Đánh giá mô hình: Độ chính xác (Accuracy), F1-Score, Confusion Matrix phục vụ báo cáo đồ án.
-
-### 7.2. Giai đoạn 5: Trung tâm chỉ huy AIOps Console & Phản ứng khép kín (`aiops-dashboard/`)
-* **Lý do cần Web Console riêng:** Grafana chỉ hiển thị biểu đồ time-series, không thể hiển thị kết quả suy luận AI theo thời gian thực (độ tin cậy confidence %, nguyên nhân gốc RCA), không có bảng theo dõi lịch sử can thiệp (action audit log) và không có nút bấm tương tác phê duyệt.
-* **Backend (`aiops-dashboard/backend/` - Python FastAPI/Flask):**
-  * Nhận Webhook cảnh báo từ Alertmanager (`:9093`).
-  * Nạp các file mô hình `.pkl` từ `ai/models/` để thực hiện suy luận (Inference).
-  * Bộ thực thi tự động (Remediation Engine): gửi lệnh can thiệp qua OOB (`vtysh` đổi OSPF cost, `iptables` drop IP, restart service).
-  * Hỗ trợ 2 chế độ: **Auto-pilot** (tự động 100%) và **Human-in-the-loop** (chờ kỹ sư duyệt trên Web).
-* **Frontend (`aiops-dashboard/frontend/`):**
-  * Giao diện Web Console hiện đại (Dark-mode).
-  * Bảng tin cảnh báo thời gian thực (Real-time Live Alert Feed).
-  * Đồ thị phân tích đặc trưng lỗi & nút bấm can thiệp/phê duyệt khắc phục.
-
-
+### 🔜 Hạng mục 3: Tích hợp vào `topo.yml` / `scripts/deploy.sh` & Đồng bộ lên Máy ảo Azure
+* Tích hợp khởi chạy tự động `monitoring/aiops-dashboard/app.py` (hoặc container `aiops-server` tại `172.20.20.55:5000`) vào `scripts/deploy.sh` và thêm bài kiểm tra sức khỏe cổng `:5000` vào `scripts/verify.sh`.
+* Kiểm tra `git status`, dọn dẹp các file rác/cache, commit và `git push` lên nhánh `main` để kéo về máy ảo Ubuntu trên Azure.

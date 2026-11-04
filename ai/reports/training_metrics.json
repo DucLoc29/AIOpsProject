@@ -1,0 +1,81 @@
+{
+  "architecture": "Three-Stage Cascaded AIOps Pipeline (Unified Dataset: aiops_network_dataset.csv)",
+  "unified_dataset": "dataset/aiops_network_dataset.csv",
+  "model1_eif_instant_detector": {
+    "ExtendedIsolationForest": {
+      "accuracy": 0.9829,
+      "precision": 0.97,
+      "recall": 1.0,
+      "f1_score": 0.9848,
+      "roc_auc": 0.9781
+    },
+    "StandardIsolationForest": {
+      "f1_score": 0.9652,
+      "roc_auc": 0.9783
+    }
+  },
+  "model2_xgboost_5m_forecaster": {
+    "XGBoost_Forecaster": {
+      "accuracy": 0.9029,
+      "precision": 0.8796,
+      "recall": 0.9596,
+      "f1_score": 0.9179,
+      "roc_auc": 0.9672,
+      "cv5_f1_mean": 0.9402
+    },
+    "RandomForest_Forecaster": {
+      "accuracy": 0.88,
+      "precision": 0.89,
+      "recall": 0.899,
+      "f1_score": 0.8945,
+      "roc_auc": 0.9716,
+      "cv5_f1_mean": 0.918
+    },
+    "ExtraTrees_Forecaster": {
+      "accuracy": 0.8686,
+      "precision": 0.9043,
+      "recall": 0.8586,
+      "f1_score": 0.8808,
+      "roc_auc": 0.9713,
+      "cv5_f1_mean": 0.8892
+    },
+    "GradientBoosting_Forecaster": {
+      "accuracy": 0.8971,
+      "precision": 0.8785,
+      "recall": 0.9495,
+      "f1_score": 0.9126,
+      "roc_auc": 0.966,
+      "cv5_f1_mean": 0.9413
+    }
+  },
+  "model3_rca_classifier": {
+    "XGBoost_RCA": {
+      "accuracy": 1.0,
+      "macro_precision": 1.0,
+      "macro_recall": 1.0,
+      "macro_f1": 1.0,
+      "cv5_f1_mean": 0.9972
+    },
+    "RandomForest_RCA": {
+      "accuracy": 1.0,
+      "macro_precision": 1.0,
+      "macro_recall": 1.0,
+      "macro_f1": 1.0,
+      "cv5_f1_mean": 1.0
+    },
+    "ExtraTrees_RCA": {
+      "accuracy": 1.0,
+      "macro_precision": 1.0,
+      "macro_recall": 1.0,
+      "macro_f1": 1.0,
+      "cv5_f1_mean": 1.0
+    },
+    "GradientBoosting_RCA": {
+      "accuracy": 1.0,
+      "macro_precision": 1.0,
+      "macro_recall": 1.0,
+      "macro_f1": 1.0,
+      "cv5_f1_mean": 1.0
+    }
+  }
+}

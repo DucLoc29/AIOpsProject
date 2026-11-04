@@ -1,0 +1,184 @@
+[
+  {
+    "label": "Normal",
+    "is_anomaly": 0,
+    "start": 1793179868,
+    "end": 1793179908,
+    "cycle": 1
+  },
+  {
+    "label": "WanCongestion",
+    "is_anomaly": 1,
+    "start": 1793179918,
+    "end": 1793179950,
+    "cycle": 1
+  },
+  {
+    "label": "Normal",
+    "is_anomaly": 0,
+    "start": 1793179970,
+    "end": 1793179990,
+    "cycle": 1
+  },
+  {
+    "label": "WanLossLatency",
+    "is_anomaly": 1,
+    "start": 1793180000,
+    "end": 1793180030,
+    "cycle": 1
+  },
+  {
+    "label": "Normal",
+    "is_anomaly": 0,
+    "start": 1793180050,
+    "end": 1793180070,
+    "cycle": 1
+  },
+  {
+    "label": "SynFlood",
+    "is_anomaly": 1,
+    "start": 1793180080,
+    "end": 1793180110,
+    "cycle": 1
+  },
+  {
+    "label": "Normal",
+    "is_anomaly": 0,
+    "start": 1793180130,
+    "end": 1793180150,
+    "cycle": 1
+  },
+  {
+    "label": "PortScan",
+    "is_anomaly": 1,
+    "start": 1793180160,
+    "end": 1793180190,
+    "cycle": 1
+  },
+  {
+    "label": "Normal",
+    "is_anomaly": 0,
+    "start": 1793180210,
+    "end": 1793180230,
+    "cycle": 1
+  },
+  {
+    "label": "SshBruteforce",
+    "is_anomaly": 1,
+    "start": 1793180240,
+    "end": 1793180272,
+    "cycle": 1
+  },
+  {
+    "label": "Normal",
+    "is_anomaly": 0,
+    "start": 1793180292,
+    "end": 1793180312,
+    "cycle": 1
+  },
+  {
+    "label": "HttpFlood",
+    "is_anomaly": 1,
+    "start": 1793180322,
+    "end": 1793180352,
+    "cycle": 1
+  },
+  {
+    "label": "Normal",
+    "is_anomaly": 0,
+    "start": 1793180372,
+    "end": 1793180392,
+    "cycle": 1
+  },
+  {
+    "label": "Normal",
+    "is_anomaly": 0,
+    "start": 1793180392,
+    "end": 1793180432,
+    "cycle": 2
+  },
+  {
+    "label": "WanCongestion",
+    "is_anomaly": 1,
+    "start": 1793180442,
+    "end": 1793180474,
+    "cycle": 2
+  },
+  {
+    "label": "Normal",
+    "is_anomaly": 0,
+    "start": 1793180494,
+    "end": 1793180514,
+    "cycle": 2
+  },
+  {
+    "label": "WanLossLatency",
+    "is_anomaly": 1,
+    "start": 1793180524,
+    "end": 1793180554,
+    "cycle": 2
+  },
+  {
+    "label": "Normal",
+    "is_anomaly": 0,
+    "start": 1793180574,
+    "end": 1793180594,
+    "cycle": 2
+  },
+  {
+    "label": "SynFlood",
+    "is_anomaly": 1,
+    "start": 1793180604,
+    "end": 1793180634,
+    "cycle": 2
+  },
+  {
+    "label": "Normal",
+    "is_anomaly": 0,
+    "start": 1793180654,
+    "end": 1793180674,
+    "cycle": 2
+  },
+  {
+    "label": "PortScan",
+    "is_anomaly": 1,
+    "start": 1793180684,
+    "end": 1793180714,
+    "cycle": 2
+  },
+  {
+    "label": "Normal",
+    "is_anomaly": 0,
+    "start": 1793180734,
+    "end": 1793180754,
+    "cycle": 2
+  },
+  {
+    "label": "SshBruteforce",
+    "is_anomaly": 1,
+    "start": 1793180764,
+    "end": 1793180796,
+    "cycle": 2
+  },
+  {
+    "label": "Normal",
+    "is_anomaly": 0,
+    "start": 1793180816,
+    "end": 1793180836,
+    "cycle": 2
+  },
+  {
+    "label": "HttpFlood",
+    "is_anomaly": 1,
+    "start": 1793180846,
+    "end": 1793180876,
+    "cycle": 2
+  },
+  {
+    "label": "Normal",
+    "is_anomaly": 0,
+    "start": 1793180896,
+    "end": 1793180916,
+    "cycle": 2
+  }
+]

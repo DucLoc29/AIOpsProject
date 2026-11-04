@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AIOps Command Center — Giám sát, Dự báo & Tự động Ứng phó Sự cố Mạng</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <!-- HEADER -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo-dot"></div>
+      <div>
+        <h1>AIOps Command Center <span class="badge-oob">OOB 172.20.20.55:5000</span></h1>
+        <p>Hệ thống Giám sát, Phát hiện Bất thường (EIF), Dự báo 5 Phút (XGBoost) &amp; Tự động Khắc phục Khép kín</p>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <div class="status-pill" id="global-status-pill">
+        <span class="pulse-dot" id="global-pulse"></span>
+        <span id="global-status-text">ĐANG GIÁM SÁT (NORMAL)</span>
+      </div>
+      <a href="http://localhost:3000" target="_blank" class="btn-outline">📊 Mở Grafana (:3000)</a>
+      <a href="http://localhost:9090" target="_blank" class="btn-outline">🔥 Prometheus (:9090)</a>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- THANH ĐIỀU KHIỂN MÔ PHỎNG KỊCH BẢN & CHÍNH SÁCH HỆ THỐNG -->
+    <section class="control-bar">
+      <div class="scenario-panel">
+        <div class="panel-title">⚡ CHỌN KỊCH BẢN MÔ PHỎNG TRỰC TIẾP (TEST PIPELINE 3 MODEL)</div>
+        <div class="scenario-buttons" id="scenario-buttons">
+          <button class="scen-btn active" data-scen="Normal">🟢 00. Bình thường (Normal)</button>
+          <button class="scen-btn spike" data-scen="TransientSpike">🟡 Gai nhiễu thoáng qua (TransientSpike)</button>
+          <button class="scen-btn" data-scen="WanCongestion">🟠 01. Nghẽn băng thông WAN1</button>
+          <button class="scen-btn" data-scen="WanLossLatency">🟠 02. Suy hao WAN1 (Loss 20% / 200ms)</button>
+          <button class="scen-btn" data-scen="SynFlood">🔴 03. Tấn công SYN Flood (Internet)</button>
+          <button class="scen-btn" data-scen="PortScan">🟣 04. Quét cổng Nội bộ (Insider LAN)</button>
+          <button class="scen-btn" data-scen="SshBruteforce">🔴 05. Dò mật khẩu SSH Brute-force</button>
+          <button class="scen-btn" data-scen="HttpFlood">🔴 06. Quá tải Ứng dụng HTTP Flood</button>
+        </div>
+      </div>
+
+      <div class="policy-panel">
+        <div class="panel-title">⚙️ CHÍNH SÁCH HỆ THỐNG (SYSTEM POLICY ENGINE)</div>
+        <div class="policy-controls">
+          <div class="slider-group">
+            <label>Ngưỡng Dự báo 5m kích hoạt Model 3: <strong id="thresh-label">60%</strong></label>
+            <input type="range" id="threshold-slider" min="30" max="90" step="5" value="60" />
+          </div>
+          <div class="toggle-group">
+            <label class="toggle-switch">
+              <input type="checkbox" id="autopilot-toggle" checked />
+              <span class="slider"></span>
+            </label>
+            <span id="autopilot-label" class="mode-badge auto">🤖 AUTO-PILOT (Tự động Khắc phục)</span>
+          </div>
+          <button class="btn-rollback" id="rollback-btn">🔄 Khôi phục Mạng (Rollback)</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- LUỒNG SUY LUẬN 3 MODEL NỐI TIẾP (THREE-STAGE CASCADED PIPELINE) -->
+    <section class="pipeline-grid">
+      <!-- MODEL 1 -->
+      <div class="stage-card" id="card-model1">
+        <div class="stage-header">
+          <span class="stage-step">TẦNG 1 · MODEL 1</span>
+          <span class="stage-algo">Extended Isolation Forest (EIF)</span>
+        </div>
+        <h3>Phát hiện Suy giảm Tức thời</h3>
+        <p class="stage-desc">Tự chọn <strong>14 chỉ số KPIs cốt lõi</strong> hiện tại, phân hoạch bằng siêu phẳng nghiêng ngẫu nhiên.</p>
+        <div class="metric-big">
+          <div>
+            <span class="metric-label">Điểm Dị thường (EIF Score)</span>
+            <div class="metric-value" id="m1-score">0.3820</div>
+          </div>
+          <div>
+            <span class="metric-label">Ngưỡng EIF</span>
+            <div class="metric-sub" id="m1-thresh">0.4910</div>
+          </div>
+        </div>
+        <div class="progress-track">
+          <div class="progress-bar" id="m1-bar" style="width: 35%"></div>
+        </div>
+        <div class="stage-verdict normal" id="m1-verdict">🟢 BÌNH THƯỜNG (current_degraded = 0)</div>
+      </div>
+
+      <!-- MODEL 2 -->
+      <div class="stage-card" id="card-model2">
+        <div class="stage-header">
+          <span class="stage-step">TẦNG 2 · MODEL 2</span>
+          <span class="stage-algo">XGBoost 5m Forecaster</span>
+        </div>
+        <h3>Dự báo Chuỗi Thời gian 5 Phút Tới</h3>
+        <p class="stage-desc">Tự chọn <strong>84 đặc trưng cửa sổ trượt</strong> (trung bình trượt, độ dốc xu hướng, độ lệch chuẩn) để lọc gai nhiễu.</p>
+        <div class="metric-big">
+          <div>
+            <span class="metric-label">Xác suất Suy giảm 5 Phút Tới</span>
+            <div class="metric-value" id="m2-prob">1.62%</div>
+          </div>
+          <div>
+            <span class="metric-label">Ngưỡng Kích hoạt</span>
+            <div class="metric-sub" id="m2-thresh">60%</div>
+          </div>
+        </div>
+        <div class="progress-track">
+          <div class="progress-bar" id="m2-bar" style="width: 2%"></div>
+        </div>
+        <div class="stage-verdict normal" id="m2-verdict">🟢 DỰ BÁO ỔN ĐỊNH (Không kéo dài 5 phút)</div>
+      </div>
+
+      <!-- SYSTEM POLICY GATE -->
+      <div class="stage-card" id="card-gate">
+        <div class="stage-header">
+          <span class="stage-step">CỔNG ĐIỀU PHỐI</span>
+          <span class="stage-algo">System Policy Engine</span>
+        </div>
+        <h3>Kiểm tra Điều kiện Kích hoạt</h3>
+        <p class="stage-desc">Điều kiện: <code>Model 1 == 1</code> <strong>VÀ</strong> <code>Model 2 &gt;= Ngưỡng Hệ thống</code> mới đánh thức Model 3.</p>
+        <div class="gate-formula" id="gate-formula">
+          <span id="gate-c1" class="cond-pill">M1: OFF</span>
+          <span>+</span>
+          <span id="gate-c2" class="cond-pill">M2 &gt;= 60%: OFF</span>
+        </div>
+        <div class="stage-verdict normal" id="gate-verdict">⏸ KHÔNG GỌI MODEL 3 (Tiết kiệm tài nguyên &amp; Chặn False Alarm)</div>
+
+        <!-- Hộp Phê duyệt Thủ công khi tắt Auto-Pilot -->
+        <div class="approval-box hidden" id="approval-box">
+          <div class="approval-title">⚠️ Chờ Quản trị viên Phê duyệt Khắc phục:</div>
+          <div class="approval-detail" id="approval-detail"></div>
+          <button class="btn-approve" id="approve-btn">✅ Phê duyệt &amp; Thực thi Ngay</button>
+        </div>
+      </div>
+
+      <!-- MODEL 3 -->
+      <div class="stage-card" id="card-model3">
+        <div class="stage-header">
+          <span class="stage-step">TẦNG 3 · MODEL 3</span>
+          <span class="stage-algo">XGBoost Multi-class RCA</span>
+        </div>
+        <h3>Chẩn đoán Nguyên nhân Gốc rễ (RCA)</h3>
+        <p class="stage-desc">Tự chọn <strong>42 đặc trưng đa tầng tức thời</strong> (WAN, Firewall, LAN, Nginx/API/DB) phân loại 7 lớp.</p>
+        <div class="metric-big">
+          <div>
+            <span class="metric-label">Nguyên nhân Chẩn đoán</span>
+            <div class="metric-value" id="m3-class">Standby</div>
+          </div>
+          <div>
+            <span class="metric-label">Độ tin cậy (Confidence)</span>
+            <div class="metric-sub" id="m3-conf">—</div>
+          </div>
+        </div>
+        <div class="remediation-box" id="m3-rem-box">
+          <div class="rem-title" id="m3-rem-title">Chưa cần can thiệp</div>
+          <code class="rem-cmd" id="m3-rem-cmd"># Hệ thống đang hoạt động bình thường</code>
+        </div>
+      </div>
+    </section>
+
+    <!-- KHU VỰC THÔNG SỐ MẠNG ĐA TẦNG & XÁC SUẤT 7 LỚP MODEL 3 -->
+    <section class="middle-grid">
+      <!-- BẢNG CHỈ SỐ MẠNG ĐA TẦNG -->
+      <div class="card">
+        <div class="card-header">
+          <h3>📡 Thông số Kỹ thuật Đa tầng Thời gian thực (42 Instantaneous Metrics Snapshot)</h3>
+          <span class="sub-tag" id="wan-route-badge">Đường truyền hiện tại: WAN1 (Primary - Cost 10)</span>
+        </div>
+        <div class="telemetry-grid">
+          <div class="tele-item">
+            <span class="tele-name">Băng thông WAN1 (RX / TX)</span>
+            <strong class="tele-val" id="t-wan1">0.12 / 0.10 Mbps</strong>
+          </div>
+          <div class="tele-item">
+            <span class="tele-name">TCP Retrans / SYN Retrans (WAN)</span>
+            <strong class="tele-val" id="t-retrans">0.00 / 0.00 pkt/s</strong>
+          </div>
+          <div class="tele-item">
+            <span class="tele-name">Lưu lượng qua Firewall (RX)</span>
+            <strong class="tele-val" id="t-fw">18.5 pkt/s</strong>
+          </div>
+          <div class="tele-item">
+            <span class="tele-name">Lưu lượng Nội bộ Client-PC (LAN TX)</span>
+            <strong class="tele-val" id="t-lan">12.0 pkt/s</strong>
+          </div>
+          <div class="tele-item">
+            <span class="tele-name">Xung đột cổng TCP RST (Server)</span>
+            <strong class="tele-val" id="t-rst">0.0 pkt/s</strong>
+          </div>
+          <div class="tele-item">
+            <span class="tele-name">Tải CPU Service Server</span>
+            <strong class="tele-val" id="t-cpu">4.2 %</strong>
+          </div>
+          <div class="tele-item">
+            <span class="tele-name">Tốc độ Request Nginx Web</span>
+            <strong class="tele-val" id="t-nginx">6.5 req/s</strong>
+          </div>
+          <div class="tele-item">
+            <span class="tele-name">Độ trễ Phản hồi Flask API</span>
+            <strong class="tele-val" id="t-api">8.4 ms</strong>
+          </div>
+        </div>
+        <div class="blocked-list" id="blocked-ips-bar">
+          🛡️ <strong>Danh sách IP đang bị cô lập trên Firewall / Server:</strong>
+          <span id="blocked-ips-text">Không có IP nào bị chặn</span>
+        </div>
+      </div>
+
+      <!-- BIỂU ĐỒ XÁC SUẤT 7 LỚP CỦA MODEL 3 (XGBOOST RCA) -->
+      <div class="card">
+        <div class="card-header">
+          <h3>📊 Phân bố Xác suất 7 Lớp Sự cố của Model 3 (XGBoost Softmax)</h3>
+          <span class="sub-tag">7 Classes Root-Cause Analysis</span>
+        </div>
+        <div class="prob-list" id="class-prob-bars">
+          <!-- Tự động render bằng JS -->
+        </div>
+      </div>
+    </section>
+
+    <!-- NHẬT KÝ TỰ ĐỘNG ỨNG PHÓ SỰ CỐ KHÉP KÍN (CLOSED-LOOP REMEDIATION AUDIT LOG) -->
+    <section class="card">
+      <div class="card-header">
+        <h3>📜 Nhật ký Tự động Ứng phó &amp; Khắc phục Sự cố qua Mạng OOB (Closed-Loop Remediation Audit Log)</h3>
+        <span class="sub-tag">Out-of-Band Control Plane (172.20.20.0/24)</span>
+      </div>
+      <div class="table-wrap">
+        <table class="audit-table">
+          <thead>
+            <tr>
+              <th>Thời gian</th>
+              <th>Kịch bản</th>
+              <th>Chế độ</th>
+              <th>Model 3 Chẩn đoán</th>
+              <th>Độ tin cậy</th>
+              <th>Thiết bị Đích (OOB IP)</th>
+              <th>Hành động &amp; Câu lệnh Thực thi</th>
+              <th>Trạng thái</th>
+            </tr>
+          </thead>
+          <tbody id="audit-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/dashboard.js"></script>
+</body>
+</html>
+

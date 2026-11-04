@@ -9,10 +9,9 @@ __pycache__/
 .venv/
 venv/
 
-# Bí mật và dữ liệu lớn (bổ sung khi có giai đoạn 2-4)
+# Bí mật và dữ liệu tạm
 .env
 *.pem
 *.key
 data/raw/
-models/*.pkl
 models/*.h5
