@@ -52,7 +52,8 @@ fi
 
 # 6. Khởi chạy nền AIOps Command Center Web Server (:5000)
 pkill -f "aiops-dashboard/backend/app.py" 2>/dev/null || true
-nohup python3 monitoring/aiops-dashboard/backend/app.py >/tmp/aiops_dashboard.log 2>&1 &
+USER_SITE=$(find "/home/${SUDO_USER:-$USER}/.local/lib" -maxdepth 2 -name "site-packages" 2>/dev/null | tr '\n' ':' || true)
+PYTHONPATH="${USER_SITE}${PYTHONPATH:-}" nohup python3 monitoring/aiops-dashboard/backend/app.py >/tmp/aiops_dashboard.log 2>&1 &
 
 echo
 echo "[✓] Deploy xong (Lab + AIOps Command Center tại http://localhost:5000). Kiểm tra: ./scripts/verify.sh"
