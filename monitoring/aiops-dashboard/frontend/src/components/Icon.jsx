@@ -1,0 +1,34 @@
+import React from 'react';
+
+const PATHS = {
+  home: 'M3 11.5 12 4l9 7.5M5.5 10v9.5h13V10',
+  brain: 'M9 4a3 3 0 0 0-3 3v.3A3.2 3.2 0 0 0 4 10.3 3.2 3.2 0 0 0 5.5 13 3.2 3.2 0 0 0 7 16.5 3 3 0 0 0 12 18V6a3 3 0 0 0-3-2Zm6 0a3 3 0 0 1 3 3v.3a3.2 3.2 0 0 1 2 3 3.2 3.2 0 0 1-1.5 2.7A3.2 3.2 0 0 1 17 16.5 3 3 0 0 1 12 18',
+  shield: 'M12 3 5 6v5.5c0 4.2 2.9 7.6 7 9.5 4.1-1.9 7-5.3 7-9.5V6l-7-3Zm-2.5 9 2 2 3.5-4',
+  bell: 'M6 16.5V11a6 6 0 1 1 12 0v5.5l1.5 2h-15l1.5-2ZM10 20.5a2 2 0 0 0 4 0',
+  server: 'M4 5h16v5.5H4V5Zm0 8.5h16V19H4v-5.5ZM7.5 8h.01M7.5 16.5h.01',
+  database: 'M5 6c0-1.7 3.1-3 7-3s7 1.3 7 3-3.1 3-7 3-7-1.3-7-3Zm0 0v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6',
+  chart: 'M4 20V4m0 16h16M8 16v-5m4 5V8m4 8v-3',
+  flame: 'M12 3c1 3.5 5 5 5 10a5 5 0 0 1-10 0c0-2 1-3 2-4 .3 1.2 1 2 2 2 0-3-1-5 1-8Z',
+  undo: 'M9 14 4 9l5-5M4 9h10a6 6 0 0 1 0 12h-3',
+  check: 'm5 12.5 4.5 4.5L19 7.5',
+  bolt: 'M13 3 5 13.5h6L10 21l8-10.5h-6L13 3Z',
+};
+
+export default function Icon({ name, size = 18, stroke = 1.7 }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={stroke}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d={PATHS[name] || PATHS.home} />
+    </svg>
+  );
+}
+

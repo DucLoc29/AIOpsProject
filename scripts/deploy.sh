@@ -43,5 +43,16 @@ sudo "$CLAB_BIN" deploy -t topo.yml --reconfigure "$@"
 sudo chmod 644 config/* || true
 sudo chmod -R 755 monitoring/ app/ || true
 
+# 5. Build frontend React nếu có npm và chưa có dist/ (dist/ đã được commit sẵn trong git)
+FE=monitoring/aiops-dashboard/frontend
+if [ ! -f "$FE/dist/index.html" ] && command -v npm >/dev/null 2>&1; then
+  echo "[+] Build frontend React (Vite)"
+  (cd "$FE" && npm install --no-audit --no-fund && npm run build) || true
+fi
+
+# 6. Khởi chạy nền AIOps Command Center Web Server (:5000)
+pkill -f "aiops-dashboard/backend/app.py" 2>/dev/null || true
+nohup python3 monitoring/aiops-dashboard/backend/app.py >/tmp/aiops_dashboard.log 2>&1 &
+
 echo
-echo "[✓] Deploy xong. Kiểm tra kết nối: ./scripts/verify.sh"
+echo "[✓] Deploy xong (Lab + AIOps Command Center tại http://localhost:5000). Kiểm tra: ./scripts/verify.sh"

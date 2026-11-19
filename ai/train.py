@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-Giai đoạn 4: Huấn luyện 3 Mô hình AI Độc lập từ 1 Dataset Hợp nhất duy nhất (`dataset/aiops_network_dataset.csv`).
+Giai đoạn 4: Huấn luyện 2 Mô hình AI Độc lập từ 1 Dataset Hợp nhất duy nhất (`dataset/aiops_network_dataset.csv`).
+(Bước Dự báo 5 phút sử dụng Công thức Toán học Chuỗi thời gian `EWMA + Trend Slope * Sustained Ratio` nên không cần train ML).
 
-Kiến trúc 3 Model riêng biệt (mỗi Model tự động chọn tập đặc trưng và cột nhãn mục tiêu của riêng mình):
+Kiến trúc 2 Model AI + 1 Công thức Dự báo:
   - MODEL 1 (`ai/models/model1_eif_detector.pkl`):
     + Thuật toán: Extended Isolation Forest (EIF)
-    + Tự động chọn: 14 đặc trưng KPI cốt lõi tức thời (`KEY_TIMESERIES_KPIS`)
-    + Cột mục tiêu: `current_degraded` (0 hoặc 1).
+    + Tự động chọn: 18 đặc trưng cửa sổ trượt (`6 thông số SLA x 3 đại lượng: Current, _roll_mean, _sustained_ratio`)
+    + Đầu ra: Điểm bất thường EIF -> Phân loại 4 mức độ hiện tại (`NORMAL`, `MEDIUM`, `HIGH`, `CRITICAL`).
 
-  - MODEL 2 (`ai/models/model2_xgboost_forecaster.pkl`):
-    + Thuật toán: XGBoost Time-Series Forecaster
-    + Tự động chọn: 84 đặc trưng chuỗi thời gian cửa sổ trượt (14 tức thời + 70 đặc trưng `_roll_mean`, `_roll_std`, `_delta1`, `_trend_slope`, `_sustained_ratio`)
-    + Cột mục tiêu: `degraded_forecast_5m` (0 hoặc 1).
+  - CÔNG THỨC DỰ BÁO 5 PHÚT (`compute_5m_trend_forecast`):
+    + Công thức động học chuỗi thời gian: `S_hat(t+5m) = EMA(S_t) + alpha * Slope(S_{t-W..t}) * R_sustained`
+    + Đầu ra: Dự báo 4 mức độ tương lai (`NORMAL`, `MEDIUM`, `HIGH`, `CRITICAL`) & lọc gai nhiễu thoáng qua.
 
-  - MODEL 3 (`ai/models/model3_rca_classifier.pkl`):
-    + Thuật toán: XGBoost Multi-class Classifier (Phân loại Đa lớp Nguyên nhân Gốc rễ)
-    + Tự động chọn: 42 đặc trưng đa tầng tức thời (Network + Firewall + Server/App/DB)
-    + Cột mục tiêu: `label` (7 lớp nguyên nhân gốc rễ).
+  - MODEL 2 (`ai/models/model2_rca_classifier.pkl`):
+    + Thuật toán: XGBoost Multi-class Classifier (Phân loại Đa lớp Nguyên nhân Sự cố - RCA)
+    + Tự động chọn: 36 đặc trưng cửa sổ trượt (`6 thông số SLA x 6 đại lượng thời gian`)
+    + Cột mục tiêu: `label` (5 lớp: `Normal`, `SynFlood`, `HttpFlood`, `SshBruteforce`, `PortScan`).
 """
 
 import argparse
@@ -67,8 +67,8 @@ def train_model1_eif(
     df: pd.DataFrame, feat_cols: List[str], random_state: int = 42
 ) -> Tuple[Dict, Dict]:
     print("\n" + "=" * 82)
-    print("1. HUẤN LUYỆN MODEL 1: EXTENDED ISOLATION FOREST (PHÁT HIỆN SUY GIẢM TỨC THỜI)")
-    print(f"   -> Tự động trích xuất {len(feat_cols)} đặc trưng tức thời | Target: current_degraded")
+    print("1. HUẤN LUYỆN MODEL 1: EXTENDED ISOLATION FOREST (ĐÁNH GIÁ HIỆN TẠI 4 MỨC ĐỘ)")
+    print(f"   -> Tự động trích xuất {len(feat_cols)} đặc trưng cửa sổ trượt (6 SLA x 3) | Target: current_degraded")
     print("=" * 82)
 
     target_col = "current_degraded"
@@ -88,7 +88,6 @@ def train_model1_eif(
     )
     print("-" * 88)
 
-    # Standard Isolation Forest
     std_iso = IsolationForest(
         n_estimators=300, contamination=0.05, random_state=random_state, n_jobs=-1
     ).fit(X_tr_s[y_tr == 0])
@@ -102,7 +101,6 @@ def train_model1_eif(
         f"{recall_score(y_te, std_preds, zero_division=0):<10.4f} | {std_f1:<10.4f} | {std_auc:<10.4f}"
     )
 
-    # Extended Isolation Forest (EIF)
     eif = ExtendedIsolationForest(
         n_estimators=360,
         n_rotations=12,
@@ -131,7 +129,6 @@ def train_model1_eif(
         f"{eif_rec:<10.4f} | {eif_f1:<10.4f} | {eif_auc:<10.4f}"
     )
 
-    # Fit trên toàn bộ dữ liệu
     final_scaler = RobustScaler().fit(X[y == 0])
     X_all_s = np.arcsinh(final_scaler.transform(X))
     final_eif = ExtendedIsolationForest(
@@ -175,116 +172,20 @@ def train_model1_eif(
     return artifact, metrics
 
 
-def train_model2_xgboost_forecaster(
+def train_model2_rca_classifier(
     df: pd.DataFrame, feat_cols: List[str], random_state: int = 42
 ) -> Tuple[Dict, Dict]:
     print("\n" + "=" * 82)
-    print("2. HUẤN LUYỆN MODEL 2: XGBOOST TIME-SERIES FORECASTER (DỰ BÁO SUY GIẢM 5 PHÚT)")
-    print(f"   -> Tự động trích xuất {len(feat_cols)} đặc trưng cửa sổ trượt | Target: degraded_forecast_5m")
-    print("=" * 82)
-
-    target_col = "degraded_forecast_5m"
-    X = df[feat_cols].values
-    y = df[target_col].values.astype(int)
-
-    X_tr, X_te, y_tr, y_te = train_test_split(
-        X, y, test_size=0.25, stratify=y, random_state=random_state
-    )
-
-    scaler = RobustScaler()
-    X_tr_s = scaler.fit_transform(X_tr)
-    X_te_s = scaler.transform(X_te)
-    X_all_s = RobustScaler().fit_transform(X)
-
-    candidates = {
-        "XGBoost_Forecaster": XGBClassifier(
-            n_estimators=250,
-            learning_rate=0.07,
-            max_depth=5,
-            subsample=0.9,
-            colsample_bytree=0.9,
-            reg_alpha=0.1,
-            reg_lambda=1.0,
-            eval_metric="logloss",
-            random_state=random_state,
-            n_jobs=-1,
-        ),
-        "RandomForest_Forecaster": RandomForestClassifier(
-            n_estimators=300, max_depth=12, class_weight="balanced", random_state=random_state, n_jobs=-1
-        ),
-        "ExtraTrees_Forecaster": ExtraTreesClassifier(
-            n_estimators=300, max_depth=14, class_weight="balanced", random_state=random_state, n_jobs=-1
-        ),
-        "GradientBoosting_Forecaster": GradientBoostingClassifier(
-            n_estimators=200, learning_rate=0.08, max_depth=4, random_state=random_state
-        ),
-    }
-
-    print(
-        f"{'Thuật toán (Model 2)':<32} | {'Accuracy':<10} | {'Precision':<10} | {'Recall':<10} | {'F1-Score':<10} | {'ROC-AUC':<10}"
-    )
-    print("-" * 88)
-
-    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=random_state)
-    comparison = {}
-
-    for name, clf in candidates.items():
-        clf.fit(X_tr_s, y_tr)
-        preds = clf.predict(X_te_s)
-        probs = clf.predict_proba(X_te_s)[:, 1]
-        cv_scores = cross_val_score(clf, X_all_s, y, cv=cv, scoring="f1", n_jobs=-1)
-
-        acc = accuracy_score(y_te, preds)
-        prec = precision_score(y_te, preds, zero_division=0)
-        rec = recall_score(y_te, preds, zero_division=0)
-        f1 = f1_score(y_te, preds, zero_division=0)
-        auc = roc_auc_score(y_te, probs)
-
-        comparison[name] = {
-            "accuracy": round(float(acc), 4),
-            "precision": round(float(prec), 4),
-            "recall": round(float(rec), 4),
-            "f1_score": round(float(f1), 4),
-            "roc_auc": round(float(auc), 4),
-            "cv5_f1_mean": round(float(np.mean(cv_scores)), 4),
-        }
-
-        print(
-            f"{name:<32} | {acc:<10.4f} | {prec:<10.4f} | {rec:<10.4f} | {f1:<10.4f} | {auc:<10.4f}"
-        )
-
-    final_scaler = RobustScaler()
-    X_all_scaled = final_scaler.fit_transform(X)
-    final_xgb = candidates["XGBoost_Forecaster"]
-    final_xgb.fit(X_all_scaled, y)
-
-    artifact = {
-        "model_type": "XGBoost_5mForecaster",
-        "model": final_xgb,
-        "scaler": final_scaler,
-        "feature_names": feat_cols,
-        "window_size": 5,
-        "target_name": target_col,
-        "metrics": comparison,
-    }
-    return artifact, comparison
-
-
-def train_model3_rca_classifier(
-    df: pd.DataFrame, feat_cols: List[str], random_state: int = 42
-) -> Tuple[Dict, Dict]:
-    print("\n" + "=" * 82)
-    print("3. HUẤN LUYỆN MODEL 3: XGBOOST MULTI-CLASS ROOT-CAUSE FAULT CLASSIFIER (RCA)")
-    print(f"   -> Tự động trích xuất {len(feat_cols)} đặc trưng đa tầng tức thời | Target: label (7 lớp)")
+    print("2. HUẤN LUYỆN MODEL 2: XGBOOST MULTI-CLASS ROOT-CAUSE FAULT CLASSIFIER (RCA)")
+    print(f"   -> Tự động trích xuất {len(feat_cols)} đặc trưng cửa sổ trượt (6 SLA x 6) | Target: label (5 lớp)")
     print("=" * 82)
 
     target_col = "label"
-    # Lọc bỏ các dòng gai nhiễu nhân tạo (Normal nhưng current_degraded=1) để giữ đặc trưng chuẩn 7 lớp
-    df3 = df[~((df["label"] == "Normal") & (df["current_degraded"] == 1))].copy()
+    df2 = df[~((df["label"] == "Normal") & (df["current_degraded"] == 1))].copy()
 
-    X = df3[feat_cols].values
+    X = df2[feat_cols].values
     label_encoder = LabelEncoder()
-    y = label_encoder.fit_transform(df3[target_col].values)
+    y = label_encoder.fit_transform(df2[target_col].values)
     class_names = list(label_encoder.classes_)
 
     X_tr, X_te, y_tr, y_te = train_test_split(
@@ -321,7 +222,7 @@ def train_model3_rca_classifier(
     }
 
     print(
-        f"{'Thuật toán (Model 3)':<32} | {'Accuracy':<10} | {'Macro-Prec':<10} | {'Macro-Rec':<10} | {'Macro-F1':<10} | {'CV-5 F1':<10}"
+        f"{'Thuật toán (Model 2 - RCA)':<32} | {'Accuracy':<10} | {'Macro-Prec':<10} | {'Macro-Rec':<10} | {'Macro-F1':<10} | {'CV-5 F1':<10}"
     )
     print("-" * 88)
 
@@ -355,7 +256,6 @@ def train_model3_rca_classifier(
         if name == "XGBoost_RCA":
             xgb_preds_te = preds
 
-    # Triển khai cố định XGBoost_RCA làm mô hình chính thức cho Model 3
     deployed_name = "XGBoost_RCA"
     cm = confusion_matrix(y_te, xgb_preds_te)
     final_scaler = StandardScaler()
@@ -387,7 +287,7 @@ def train_model3_rca_classifier(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Huấn luyện 3 Model AIOps độc lập từ 1 Dataset Hợp nhất duy nhất."
+        description="Huấn luyện 2 Model AIOps (Model 1: EIF & Model 2: XGBoost RCA) từ 1 Dataset Hợp nhất."
     )
     parser.add_argument("--dataset", type=Path, default=DEFAULT_UNIFIED_CSV)
     parser.add_argument("--models-dir", type=Path, default=MODELS_DIR)
@@ -397,42 +297,42 @@ def main() -> int:
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
     df = pd.read_csv(args.dataset).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    m1_feats, m2_feats, m3_feats = get_model_feature_sets(df)
+    m1_feats, m2_rca_feats = get_model_feature_sets(df)
 
     print(f"[*] Đã nạp Dataset Hợp nhất: {args.dataset}")
     print(f"    Kích thước: {df.shape[0]} mẫu x {df.shape[1]} cột")
 
     m1_art, m1_met = train_model1_eif(df, m1_feats)
-    m2_art, m2_met = train_model2_xgboost_forecaster(df, m2_feats)
-    m3_art, m3_met = train_model3_rca_classifier(df, m3_feats)
+    m2_art, m2_met = train_model2_rca_classifier(df, m2_rca_feats)
 
     p1 = args.models_dir / "model1_eif_detector.pkl"
-    p2 = args.models_dir / "model2_xgboost_forecaster.pkl"
-    p3 = args.models_dir / "model3_rca_classifier.pkl"
+    p2 = args.models_dir / "model2_rca_classifier.pkl"
 
     joblib.dump(m1_art, p1)
     joblib.dump(m2_art, p2)
-    joblib.dump(m3_art, p3)
 
-    # Giữ cả file alias để tương thích
-    joblib.dump(m3_art, args.models_dir / "fault_classifier.pkl")
+    # Xóa các file model cũ (model2_xgboost_forecaster.pkl, model3_rca_classifier.pkl, fault_classifier.pkl) để không còn tàn dư
+    for old_file in ("model2_xgboost_forecaster.pkl", "model3_rca_classifier.pkl", "fault_classifier.pkl"):
+        old_p = args.models_dir / old_file
+        if old_p.exists():
+            old_p.unlink()
 
     summary = {
-        "architecture": "Three-Stage Cascaded AIOps Pipeline (Unified Dataset: aiops_network_dataset.csv)",
+        "architecture": "Two-Model + Time-Series Trend Formula AIOps Pipeline (Unified 6-SLA Dataset)",
         "unified_dataset": str(args.dataset.relative_to(PROJECT_ROOT)),
-        "model1_eif_instant_detector": m1_met,
-        "model2_xgboost_5m_forecaster": m2_met,
-        "model3_rca_classifier": m3_met,
+        "model1_eif_detector": m1_met,
+        "forecast_5m_formula": "S_hat(t+5m) = EMA(S_t) + alpha * Slope(S_{t-W..t}) * R_sustained",
+        "model2_rca_classifier": m2_met,
     }
     report_path = REPORTS_DIR / "training_metrics.json"
     with report_path.open("w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
 
     print("\n" + "=" * 82)
-    print("[✓] ĐÃ HUẤN LUYỆN VÀ ĐÓNG GÓI 3 MODEL RIÊNG BIỆT TỪ 1 DATASET HỢP NHẤT:")
-    print(f"  1. Model 1 (EIF Phát hiện Tức thời)     : {p1}")
-    print(f"  2. Model 2 (XGBoost Dự báo 5 Phút Tới)  : {p2}")
-    print(f"  3. Model 3 (RCA Phân loại Nguyên nhân)  : {p3}")
+    print("[✓] ĐÃ HUẤN LUYỆN VÀ ĐÓNG GÓI 2 MODEL AI (+ 1 CÔNG THỨC DỰ BÁO 5M):")
+    print(f"  1. Model 1 (EIF Đánh giá Hiện tại 4 mức) : {p1}")
+    print("  2. Dự báo 5 Phút Tới                     : Công thức EWMA + Trend Slope * Sustained Ratio")
+    print(f"  3. Model 2 (XGBoost RCA Phân loại 5 lớp) : {p2}")
     print("=" * 82)
     return 0
 

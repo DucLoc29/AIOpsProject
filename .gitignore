@@ -15,3 +15,6 @@ venv/
 *.key
 data/raw/
 models/*.h5
+
+# Frontend React (dist/ được commit để máy Azure không cần cài Node.js)
+node_modules/

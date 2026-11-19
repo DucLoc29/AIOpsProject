@@ -92,6 +92,14 @@ ACTIVE_TARGETS=$($DKR exec $P-prometheus wget -qO- http://127.0.0.1:9090/api/v1/
   && ok "Prometheus scrape targets active ($ACTIVE_TARGETS targets UP)" \
   || bad "Prometheus scrape targets: chỉ có $ACTIVE_TARGETS targets UP"
 
+echo "== 10. AIOps Command Center (:5000) & Bộ 2 Model AI + Công thức Dự báo"
+for m in model1_eif_detector.pkl model2_rca_classifier.pkl; do
+  [ -f "ai/models/$m" ] && ok "Đã nạp file mô hình ai/models/$m" || bad "Thiếu file ai/models/$m"
+done
+curl -sf -m3 http://127.0.0.1:5000/api/state | grep -q '"model1"' \
+  && ok "AIOps Command Center (:5000) & Pipeline 3 Model hoạt động tốt" \
+  || bad "AIOps Command Center (:5000) chưa phản hồi"
+
 echo
 echo "Kết quả: $PASS PASS / $FAIL FAIL"
 [ "$FAIL" -eq 0 ]
