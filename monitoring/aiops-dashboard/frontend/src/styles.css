@@ -135,15 +135,15 @@ body {
 }
 
 .nav-item:hover {
-  background: rgba(0, 0, 0, 0.04);
+  background: rgba(0, 0, 0, 0.05);
   color: var(--apple-text);
 }
 
 .nav-item.active {
-  background: var(--apple-blue);
+  background: #1d1d1f;
   color: #ffffff;
   font-weight: 600;
-  box-shadow: 0 2px 8px rgba(0, 113, 227, 0.28);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
 }
 
 .nav-item-left {
@@ -189,8 +189,8 @@ body {
 }
 
 .ext-link:hover {
-  background: rgba(0, 0, 0, 0.04);
-  color: var(--apple-blue);
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--apple-text);
 }
 
 .sidebar-footer {
@@ -347,28 +347,35 @@ body {
 }
 
 .apple-btn:hover {
-  border-color: var(--apple-blue);
-  color: var(--apple-blue);
-  background: #fbfbfd;
+  border-color: rgba(0, 0, 0, 0.25);
+  color: var(--apple-text);
+  background: #f2f2f7;
 }
 
+.apple-btn:active,
 .apple-btn.active {
-  background: var(--apple-blue);
+  background: #1d1d1f;
   color: #ffffff;
-  border-color: var(--apple-blue);
+  border-color: #1d1d1f;
   font-weight: 600;
-  box-shadow: 0 2px 10px rgba(0, 113, 227, 0.25);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
 }
 
 .apple-btn.secondary {
-  background: var(--apple-blue-soft);
-  color: var(--apple-blue);
+  background: #f2f2f7;
+  color: #1d1d1f;
   border-color: transparent;
   font-weight: 600;
 }
 
 .apple-btn.secondary:hover {
-  background: rgba(0, 113, 227, 0.15);
+  background: #e5e5ea;
+  color: #1d1d1f;
+}
+
+.apple-btn.secondary:active {
+  background: #1d1d1f;
+  color: #ffffff;
 }
 
 /* 4-STAGE PIPELINE CARDS */
@@ -901,6 +908,11 @@ body {
 
 .tab-strip { display: flex; gap: 8px; flex-wrap: wrap; }
 .tab-item { font-family: inherit; display: inline-flex; align-items: center; gap: 8px; padding: 9px 16px; border-radius: 999px; border: 1px solid var(--apple-border-strong); background: #fff; font-size: 0.84rem; font-weight: 500; cursor: pointer; color: var(--apple-text); }
+.tab-item:hover {
+  background: #f2f2f7;
+  color: var(--apple-text);
+}
+.tab-item:active,
 .tab-item.active { background: var(--apple-text); color: #fff; border-color: var(--apple-text); }
 .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
 .sev-dot-NORMAL { background: var(--apple-green); }
