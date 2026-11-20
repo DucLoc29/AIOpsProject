@@ -841,6 +841,10 @@ body {
 .sev-MEDIUM { background: #fff8d6; color: #8a6d00; }
 .sev-HIGH { background: var(--apple-orange-soft); color: var(--apple-orange-text); }
 .sev-CRITICAL { background: var(--apple-red-soft); color: var(--apple-red-text); }
+.sev-text-NORMAL { color: var(--apple-green-text); }
+.sev-text-MEDIUM { color: #8a6d00; }
+.sev-text-HIGH { color: var(--apple-orange-text); }
+.sev-text-CRITICAL { color: var(--apple-red-text); }
 
 .status-banner { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 22px 26px; border-radius: 18px; border: 1px solid var(--apple-border); }
 .status-banner h2 { font-size: 1.45rem; font-weight: 700; letter-spacing: -0.02em; }

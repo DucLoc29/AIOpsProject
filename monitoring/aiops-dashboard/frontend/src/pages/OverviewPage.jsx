@@ -1,6 +1,6 @@
 import React from 'react';
 import { Code } from '../components/DataTable.jsx';
-import { StatusPill, faultLabel, sevLabel, sevRank, worstLevel } from '../lib.jsx';
+import { StatusPill, faultLabel, normSev, sevLabel, sevRank, worstLevel } from '../lib.jsx';
 
 function Metric({ label, value, unit }) {
   return (
@@ -15,7 +15,8 @@ function Metric({ label, value, unit }) {
 }
 
 function ServiceCard({ ev, onOpen }) {
-  const sev = ev.severity_level || 'NORMAL';
+  const sev = normSev(ev.severity_level);
+  const forecastSev = normSev(ev.model2?.forecast_level);
   const m = ev.metrics || {};
   const invoked = ev.model3?.invoked;
   const protectedNow = ev.protection_status === 'PROTECTED';
@@ -42,8 +43,8 @@ function ServiceCard({ ev, onOpen }) {
       <div className="svc-lines">
         <div>
           <span>Dự báo 5 phút tới</span>
-          <strong>
-            {sevLabel(ev.model2?.forecast_level)} ({ev.model2?.prob_5m_pct?.toFixed(0) ?? 0}%)
+          <strong className={`sev-text-${forecastSev}`}>
+            {sevLabel(forecastSev)} ({ev.model2?.prob_5m_pct?.toFixed(0) ?? 0}%)
           </strong>
         </div>
         <div>

@@ -1,7 +1,7 @@
 import React from 'react';
 import PerformanceCharts from '../components/PerformanceCharts.jsx';
 import DataTable, { Badge, Code } from '../components/DataTable.jsx';
-import { StatusPill, faultLabel, sevLabel } from '../lib.jsx';
+import { StatusPill, faultLabel, normSev, sevLabel } from '../lib.jsx';
 
 export default function ServiceDetailPage({ ctx, selectedService, onSelectService, onNavigate }) {
   const { state, db, approve, rollback } = ctx;
@@ -12,7 +12,8 @@ export default function ServiceDetailPage({ ctx, selectedService, onSelectServic
   if (!ev) return <div className="apple-card">Chưa có dịch vụ nào để hiển thị.</div>;
 
   const sid = ev.service_id;
-  const sev = ev.severity_level || 'NORMAL';
+  const sev = normSev(ev.severity_level);
+  const forecastSev = normSev(ev.model2?.forecast_level);
   const invoked = ev.model3?.invoked;
   const activeRule = ev.active_rule;
   const pendingRule = ev.pending_rule;
@@ -54,12 +55,12 @@ export default function ServiceDetailPage({ ctx, selectedService, onSelectServic
       <div className="summary-3">
         <div className="apple-card summary-box">
           <span>Tình trạng hiện tại</span>
-          <strong>{sevLabel(sev)}</strong>
+          <strong className={`sev-text-${sev}`}>{sevLabel(sev)}</strong>
           <em>Đánh giá bởi Model 1 (EIF)</em>
         </div>
         <div className="apple-card summary-box">
           <span>Dự báo 5 phút tới</span>
-          <strong>{sevLabel(ev.model2?.forecast_level)}</strong>
+          <strong className={`sev-text-${forecastSev}`}>{sevLabel(forecastSev)}</strong>
           <em>Khả năng suy giảm kéo dài: {ev.model2?.prob_5m_pct?.toFixed(0) ?? 0}%</em>
         </div>
         <div className="apple-card summary-box">

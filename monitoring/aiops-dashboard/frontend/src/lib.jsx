@@ -8,6 +8,7 @@ export const SEVERITY = {
   CRITICAL: { label: 'Nghiêm trọng', rank: 3 },
 };
 
+export const normSev = (s) => (SEVERITY[s] ? s : 'NORMAL');
 export const sevLabel = (s) => SEVERITY[s]?.label || s || 'Bình thường';
 export const sevRank = (s) => SEVERITY[s]?.rank ?? 0;
 
