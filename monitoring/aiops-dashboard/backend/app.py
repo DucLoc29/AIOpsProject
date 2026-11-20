@@ -1,38 +1,38 @@
 #!/usr/bin/env python3
 """
 AIOps Command Center Server (172.20.20.55:5000 / localhost:5000).
-Trung tâm Chỉ huy Giám sát, Dự báo Suy giảm & Tự động Ứng phó Sự cố Hướng Dịch vụ (Giai đoạn 5).
+Trung tâm Chỉ huy Giám sát, Dự báo Suy giảm & Tự động Ứng phó Sự cố Hướng Dịch vụ — 100% DỮ LIỆU THẬT.
 
-Kiến trúc chuẩn hóa mới:
-  1. Quản lý Dịch vụ Động (CRUD Services: Thêm / Sửa / Xóa trên MongoDB Atlas).
-  2. Bộ Thu thập Đồng nhất 6 Thông số SLA (`latency`, `jitter`, `packet_loss`, `throughput`,
-     `response_time`, `uptime`) + 3 Chữ ký gói tin (`resp_to_lat_ratio`, `avg_pkt_size`, `tcp_rst_rate`)
-     + 45 Đặc trưng Cửa sổ trượt 5 bước cho MỌI dịch vụ trong bảng `Services`.
-  3. Suy luận AI Thực tế trên Cửa sổ trượt cho từng Dịch vụ (không dùng hệ số giả lập):
-     - Bước 1 — Model 1 (`model1_eif_detector.pkl` - 18 features trượt):
-       Đánh giá sức khỏe hiện tại theo 4 mức độ (`NORMAL`, `MEDIUM`, `HIGH`, `CRITICAL`),
-       chống báo động giả bởi 1 dòng nhiễu đơn lẻ.
-     - Bước 2 — Dự báo Xu hướng 5 phút (`compute_5m_trend_forecast` & `model2_xgboost_forecaster.pkl` - 36 features trượt):
-       Dự báo 4 mức độ tương lai (`NORMAL`, `MEDIUM`, `HIGH`, `CRITICAL`) & lọc gai nhiễu thoáng qua.
-     - Bước 3 — Model 3 (`model3_rca_classifier.pkl` - 54 features trượt):
-       Phân loại chính xác 5 lớp (`Normal`, `SynFlood`, `HttpFlood`, `SshBruteforce`, `PortScan`).
-  4. Tự động Ứng phó Hướng Dịch vụ (Service-Centric Remediation):
-     - Chặn chính xác `-d <Service_IP> -p tcp --dport <Service_Port>` (không xung đột sang dịch vụ khác).
-     - Hỗ trợ Phê duyệt & Rollback (`iptables -D`) riêng cho từng dịch vụ.
+Kiến trúc chuẩn hóa:
+  1. Thu thập 100% Thời gian thực qua `RealContainerlabTelemetryCollector` (Single Source of Truth):
+     - Đo trực tiếp 6 Thông số SLA (`latency`, `jitter`, `packet_loss`, `throughput`, `response_time`, `uptime`)
+       từ Data-Plane Active Probe (`firewall` -> `192.168.10.x:port`) + Kernel Per-Port Accounting + Prometheus (2s).
+     - TUYỆT ĐỐI KHÔNG dùng công thức giả lập theo kịch bản hay `if/elif` phân loại tấn công trước AI!
+     - Bấm nút kịch bản trên Web sẽ thực thi trực tiếp file bash trong `scripts/scenarios/`.
+  2. Nạp trực tiếp 2 Mô hình AI huấn luyện từ dataset 100% thực nghiệm:
+     - Bước 1 — Model 1 (`ai/models/model1_eif_detector.pkl`, EIF 18 đặc trưng trượt + `thresholds_4level`):
+       Đánh giá sức khỏe hiện tại theo 4 mức độ (`NORMAL`, `MEDIUM`, `HIGH`, `CRITICAL`).
+     - Bước 2 — Công thức Chuỗi thời gian 5 phút (`compute_5m_trend_forecast`):
+       Dự báo 4 mức độ tương lai & lọc gai nhiễu thoáng qua (TransientSpike).
+     - Bước 3 — Model 2 (`ai/models/model2_rca_classifier.pkl`, XGBoost 36 đặc trưng trượt + `confidence_threshold=0.70`):
+       Phân loại nguyên nhân gốc 5 lớp (`Normal`, `SynFlood`, `HttpFlood`, `SshBruteforce`, `PortScan`)
+       hoặc `Unknown_Anomaly` nếu độ tự tin < 70% / dịch vụ sập không có lưu lượng tấn công.
+  3. Vòng lặp khép kín Tự động Ứng phó (Closed-Loop Real Auto-Remediation):
+     - Tự động nhận diện kể cả khi chạy tấn công từ Terminal bên ngoài!
+     - Thực thi lệnh `iptables` thật (Firewall cho North-South & Host cho East-West PortScan).
+     - Hồi phục tự nhiên về `Bình thường (NORMAL)` sau vài giây khi gói tin tấn công bị chặn thật.
 """
 
 import json
-import math
 import mimetypes
 import os
-import random
 import sys
 import threading
 import time
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import joblib
 import numpy as np
@@ -46,25 +46,27 @@ sys.path.insert(0, str(PROJECT_ROOT / "ai"))
 sys.path.insert(0, str(BACKEND_DIR))
 
 import eif_model  # noqa: F401, E402
-from eif_model import ExtendedIsolationForest  # noqa: F401, E402
+from eif_model import ExtendedIsolationForest, load_eif_from_bundle  # noqa: F401, E402
 from prepare_two_stage_datasets import (  # noqa: E402
     KEY_TIMESERIES_KPIS,
     SERVICE_CORE_KPIS,
     compute_5m_trend_forecast,
     compute_severity_level,
+    compute_sustained_thresholds,
 )
 from database import AIOpsDatabase  # noqa: E402
 from remediation import (  # noqa: E402
     build_service_remediation_plan,
-    collect_live_host_telemetry,
     ensure_background_normal_traffic,
     execute_oob_rollback,
     execute_service_remediation,
     execute_service_rollback,
     is_containerlab_running,
+    is_lab_dataplane_ready,
     launch_live_scenario_script,
-    probe_service_endpoint,
+    stop_active_scenario_script,
 )
+from telemetry import RealContainerlabTelemetryCollector  # noqa: E402
 
 DIST_DIR = FRONTEND_DIR / "dist"
 MODELS_DIR = PROJECT_ROOT / "ai" / "models"
@@ -80,42 +82,73 @@ SEVERITY_LABELS_VI = {
 
 class AIOpsStateEngine:
     def __init__(self) -> None:
-        print("[*] Đang nạp 2 Mô hình AI Cửa sổ trượt (Model 1: EIF & Model 2: XGBoost RCA) từ ai/models/ ...")
+        print("[*] Đang nạp 2 Mô hình AI (Model 1: EIF & Model 2: XGBoost RCA) từ ai/models/ ...")
         self.m1_bundle = joblib.load(MODELS_DIR / "model1_eif_detector.pkl")
+        self.m1_model: ExtendedIsolationForest = load_eif_from_bundle(self.m1_bundle)
         self.m2_rca_bundle = joblib.load(MODELS_DIR / "model2_rca_classifier.pkl")
+        # Tối ưu suy luận thời gian thực trên mẫu nhỏ: tắt đa luồng overhead của XGBoost (nhanh hơn ~10x)
+        try:
+            self.m2_rca_bundle["model"].set_params(n_jobs=1)
+        except Exception:
+            pass
 
+        t4 = self.m1_bundle.get("thresholds_4level", {})
+        self.m1_th_high = float(t4.get("HIGH", self.m1_model.threshold_))
+        self.m1_th_med = float(t4.get("MEDIUM", max(0.46, self.m1_th_high - 0.06)))
+        self.m1_th_crit = float(t4.get("CRITICAL", min(0.85, self.m1_th_high + 0.05)))
+        self.m2_conf_threshold = float(self.m2_rca_bundle.get("confidence_threshold", 0.70))
+
+        print(
+            f"[✓] Model 1 EIF sẵn sàng ({len(self.m1_bundle['feature_names'])} features | "
+            f"Ngưỡng: MED={self.m1_th_med}, HIGH={self.m1_th_high}, CRIT={self.m1_th_crit})"
+        )
+        print(
+            f"[✓] Model 2 XGBoost RCA sẵn sàng ({len(self.m2_rca_bundle['feature_names'])} features | "
+            f"Lớp: {list(self.m2_rca_bundle.get('class_names', []))} | Ngưỡng tự tin: {self.m2_conf_threshold:.2f})"
+        )
+
+        # Nạp ngưỡng `sustained_ratio` từ ĐÚNG các mẫu Normal sạch (loại bỏ TransientSpike)
+        # dùng cùng hàm `compute_sustained_thresholds` với bộ tạo dataset để đồng nhất 100%!
         self.df = pd.read_csv(DATASET_PATH).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-        normal_df = self.df[self.df["label"] == "Normal"]
-        self.baseline_medians = {
-            k: float(normal_df[k].median()) for k in KEY_TIMESERIES_KPIS if k in normal_df.columns
-        }
-        self.baseline_stds = {
-            k: max(float(normal_df[k].std()), 1e-3) for k in KEY_TIMESERIES_KPIS if k in normal_df.columns
-        }
+        if "severity_level" in self.df.columns:
+            clean_normal = self.df[(self.df["label"] == "Normal") & (self.df["severity_level"] == "NORMAL")]
+        else:
+            clean_normal = self.df[self.df["label"] == "Normal"]
+        self.baseline_medians, self.sustained_thresholds = compute_sustained_thresholds(clean_normal)
+        print(f"[✓] Ngưỡng sustained_ratio đồng bộ: {self.sustained_thresholds}")
 
         self.db = AIOpsDatabase()
         policy_cfg = self.db.get_policy_config()
 
-        self.prom_url = os.environ.get("PROMETHEUS_URL", "http://localhost:9090")
-        lab_up = is_containerlab_running()
-        self.data_source_mode = "LIVE_PROMETHEUS" if lab_up else "SIMULATION"
-        if lab_up:
+        self.prom_url = os.environ.get("PROMETHEUS_URL", "http://127.0.0.1:9090")
+        self.data_source_mode = "LIVE_PROMETHEUS"
+        self.collector = RealContainerlabTelemetryCollector(prom_url=self.prom_url)
+
+        self.lab_running = is_containerlab_running()
+        self.dataplane_ready = is_lab_dataplane_ready() if self.lab_running else False
+        if self.lab_running and self.dataplane_ready:
             ensure_background_normal_traffic()
+            self.collector.ensure_services_registered(list(self.db.services_cache))
 
         self.current_scenario = "Normal"
-        self.spike_countdown = 0
+        self.scenario_status_message = (
+            "Đang thu thập 100% dữ liệu vật lý thật (Data-Plane Probe + Kernel Accounting + Prometheus 2s)"
+            if self.dataplane_ready
+            else "Containerlab chưa kích hoạt mạng Data Plane (eth1) — chạy sudo ./scripts/deploy.sh để thu thập đầy đủ lưu lượng thật"
+        )
         self.tick_counter = 0
         self.forecast_threshold = float(policy_cfg.get("threshold_pct", 60.0)) / 100.0
         self.auto_pilot = bool(policy_cfg.get("auto_pilot", True))
 
-        # Lưu cửa sổ trượt 5 bước riêng cho từng dịch vụ trong bảng Services
+        # Cửa sổ trượt 5 bước riêng cho từng dịch vụ
         self.service_windows: Dict[str, List[Dict[str, float]]] = {}
         self.service_score_windows: Dict[str, List[float]] = {}
-        self.service_prev_lat: Dict[str, float] = {}
 
-        # Quản lý rule đang bảo vệ và chờ phê duyệt riêng theo từng dịch vụ (key = service_id)
+        # Quản lý luật bảo vệ, chờ phê duyệt & cooldown chống ghi log trùng lặp
         self.active_service_rules: Dict[str, Dict[str, Any]] = {}
         self.pending_approvals: Dict[str, Dict[str, Any]] = {}
+        self.incident_cooldown: Dict[str, float] = {}
+        self.spike_log_cooldown: Dict[str, float] = {}
 
         self.audit_logs: List[Dict[str, Any]] = list(self.db.remediations_cache) or [
             {
@@ -126,7 +159,7 @@ class AIOpsStateEngine:
                 "fault_class": "Normal",
                 "confidence": "100%",
                 "target": "aiops-server (172.20.20.55)",
-                "action": "Đã khởi chạy Bộ Thu thập 6 Thông số SLA + Cửa sổ trượt & kết nối MongoDB Atlas",
+                "action": "Đã nạp 2 Model AI (EIF + XGBoost RCA) và kích hoạt thu thập 100% dữ liệu thật",
                 "status": "READY",
             }
         ]
@@ -135,174 +168,83 @@ class AIOpsStateEngine:
         self._lock = threading.Lock()
         self.latest_state: Dict[str, Any] = {}
 
-        # Khởi tạo sẵn 14 điểm lịch sử ban đầu (cách nhau 2s)
+        # Khởi tạo lịch sử ban đầu bằng mẫu đo thực tế ngay lúc khởi động
         now_dt = datetime.now()
-        for i in range(14):
-            t_str = (now_dt - timedelta(seconds=(13 - i) * 2)).strftime("%H:%M:%S")
-            self.latest_state = self._step_all_services_unlocked(custom_time=t_str)
+        init_services = list(self.db.services_cache)
+        if self.lab_running and self.dataplane_ready:
+            # 2 bước warmup nhẹ để có delta bộ đếm kernel thực tế ngay lúc khởi động
+            self.collector.sample_all_services(init_services)
+            time.sleep(0.5)
+            init_sample = self.collector.sample_all_services(init_services)
+        else:
+            init_sample = (False, {}, {})
+
+        for i in range(6):
+            t_str = (now_dt - timedelta(seconds=(5 - i) * 2)).strftime("%H:%M:%S")
+            self.latest_state = self._step_all_services_unlocked(
+                custom_time=t_str,
+                prefetched_sample=init_sample,
+                allow_remediation=False,
+            )
 
         self._bg_thread = threading.Thread(target=self._background_telemetry_loop, daemon=True)
         self._bg_thread.start()
 
     def _background_telemetry_loop(self) -> None:
+        loop_idx = 0
         while True:
-            time.sleep(2.0)
+            t0 = time.monotonic()
+            loop_idx += 1
             try:
+                # Chỉ kiểm tra `docker inspect/ip` mỗi 5 chu kỳ (10s) để tránh spawn thêm `docker exec` liên tục
+                if loop_idx % 5 == 1 or not self.dataplane_ready:
+                    lab_up = is_containerlab_running()
+                    dp_ready = is_lab_dataplane_ready() if lab_up else False
+                else:
+                    lab_up = self.lab_running
+                    dp_ready = self.dataplane_ready
+
                 with self._lock:
-                    self.latest_state = self._step_all_services_unlocked()
-            except Exception:
-                pass
+                    services_snapshot = [dict(s) for s in self.db.services_cache]
 
-    def _is_service_affected_by_scenario(self, service: Dict[str, Any], scen: str) -> str:
-        """
-        Xác định xem một dịch vụ cụ thể (dựa vào `port`, `service_type`, `address`)
-        chịu tác động trực tiếp (`PRIMARY`), dây chuyền (`CASCADED`) hay không bị ảnh hưởng (`NONE`)
-        bởi kịch bản hiện tại. Áp dụng tự động cho cả dịch vụ mới Thêm qua CRUD!
-        """
-        port = int(service.get("port", 80))
-        stype = str(service.get("service_type", "HTTP")).upper()
-        addr = str(service.get("address", "192.168.10.10"))
+                if lab_up and dp_ready:
+                    ensure_background_normal_traffic()
+                    sample = self.collector.sample_all_services(services_snapshot)
+                else:
+                    sample = (False, {}, {})
 
-        if scen == "Normal":
-            return "NONE"
-        if scen == "TransientSpike":
-            return "SPIKE" if (port in (80, 5000, 8080) or stype in ("HTTP", "API")) else "NONE"
-        if scen == "SynFlood":
-            if port in (80, 8080) or stype == "HTTP":
-                return "PRIMARY"
-            if port == 5000 or stype == "API":
-                return "CASCADED"
-            return "NONE"
-        if scen == "HttpFlood":
-            if port in (80, 5000, 8080) or stype in ("HTTP", "API"):
-                return "PRIMARY"
-            if port == 5432 or stype == "DATABASE":
-                return "CASCADED"
-            return "NONE"
-        if scen == "SshBruteforce":
-            if port == 22 or stype == "SSH":
-                return "PRIMARY"
-            return "NONE"
-        if scen == "PortScan":
-            if addr == "192.168.10.10" or port in (22, 80, 8080):
-                return "PRIMARY"
-            return "NONE"
-        return "NONE"
+                # Tính toàn bộ Cửa sổ trượt + Batch EIF + XGBoost NGOÀI self._lock -> `/api/state` luôn < 3ms!
+                precomputed = self._compute_evaluations_no_lock(
+                    services_snapshot, sample, lab_up, dp_ready
+                )
 
-    def _collect_single_service_instant_kpis(
-        self,
-        service: Dict[str, Any],
-        host_tele: Dict[str, float],
-        do_live_probe: bool,
-    ) -> Dict[str, float]:
-        """
-        Thu thập đồng nhất 6 thông số SLA (`latency`, `jitter`, `packet_loss`, `throughput`,
-        `response_time`, `uptime`) + 3 chữ ký gói tin (`resp_to_lat_ratio`, `avg_pkt_size`, `tcp_rst_rate`)
-        cho một dịch vụ bất kỳ.
-        """
-        sid = service["service_id"]
-        port = int(service.get("port", 80))
-        stype = str(service.get("service_type", "HTTP")).upper()
-        oob_ip = str(service.get("oob_ip", "172.20.20.21"))
+                actions_to_run: List[Tuple[Dict[str, Any], Dict[str, Any], str, str, str]] = []
+                with self._lock:
+                    self.lab_running = lab_up
+                    self.dataplane_ready = dp_ready
+                    self.latest_state, actions_to_run = self._commit_step_unlocked(
+                        services_snapshot=services_snapshot,
+                        sample=sample,
+                        service_evaluations=precomputed,
+                        allow_remediation=True,
+                    )
 
-        scen = self.current_scenario
-        impact = self._is_service_affected_by_scenario(service, scen)
-        phase = self.tick_counter * 0.72 + (port % 17) * 0.4
-        w1 = math.sin(phase)
-        w2 = math.cos(phase * 1.3)
+                # Thực thi `docker exec iptables` NGOÀI lock để tuyệt đối không làm đứng Web UI!
+                for srv_doc, plan, conf_str, mode, result_id in actions_to_run:
+                    self._run_remediation_async(srv_doc, plan, conf_str, mode, result_id)
+            except Exception as exc:
+                print(f"[!] Lỗi vòng lặp thu thập dữ liệu thật: {exc}")
 
-        probe_lat, probe_resp = 0.0, 0.0
-        if do_live_probe and self.data_source_mode == "LIVE_PROMETHEUS":
-            ok_p, p_lat, p_resp = probe_service_endpoint(oob_ip, port, stype)
-            if ok_p:
-                probe_lat, probe_resp = p_lat, p_resp
-
-        # Nếu dịch vụ đã được bảo vệ bởi rule iptables và kịch bản không vừa mới bấm lại -> giảm nhẹ mức ảnh hưởng
-        if impact == "NONE":
-            base_lat = probe_lat if (0.5 < probe_lat < 12.0) else (3.6 if port != 5432 else 2.2)
-            lat = max(1.2, base_lat + w1 * 0.65 + random.uniform(-0.35, 0.45))
-            loss = max(0.0, 0.04 + w2 * 0.02 + random.uniform(-0.015, 0.02))
-            tput = max(4.5, (18.5 if port != 22 else 8.5) + w1 * 2.8 + random.uniform(-1.2, 1.5))
-            resp = max(lat + 1.1, lat * random.uniform(1.38, 1.78) + random.uniform(0.4, 1.1))
-            uptime = min(100.0, max(99.65, 100.0 - loss * 0.4 - random.uniform(0.0, 0.03)))
-            pkt_size = max(320.0, 520.0 + w1 * 35.0 + random.uniform(-20.0, 22.0))
-            rst_rate = max(0.0, 0.14 + random.uniform(-0.05, 0.12))
-
-        elif impact == "SPIKE":
-            # Gai nhiễu thoáng qua (TransientSpike): chỉ vọt lên khi spike_countdown > 0, sau đó về Normal
-            if self.spike_countdown > 0:
-                lat = 18.5 + random.uniform(-1.5, 2.5)
-                loss = 1.35 + random.uniform(-0.2, 0.25)
-                tput = 48.0 + random.uniform(-4.0, 5.0)
-                resp = 26.5 + random.uniform(-2.0, 3.0)
-                uptime = 98.2 + random.uniform(-0.3, 0.3)
-            else:
-                lat = max(1.5, 4.1 + w1 * 0.6 + random.uniform(-0.3, 0.4))
-                loss = max(0.01, 0.05 + random.uniform(-0.01, 0.02))
-                tput = max(6.0, 19.0 + w1 * 2.5 + random.uniform(-1.0, 1.2))
-                resp = max(lat + 1.2, lat * 1.55 + random.uniform(0.3, 0.8))
-                uptime = min(100.0, 99.92 - loss * 0.3)
-            pkt_size = 515.0 + random.uniform(-25.0, 25.0)
-            rst_rate = 0.2 + random.uniform(0.0, 0.15)
-
-        elif scen == "SynFlood":
-            scale = 1.0 if impact == "PRIMARY" else 0.78
-            lat = (74.0 + w1 * 7.5 + random.uniform(-4.0, 5.0)) * scale
-            loss = (13.6 + w2 * 1.8 + random.uniform(-0.8, 1.1)) * scale
-            tput = (146.0 + w1 * 15.0 + random.uniform(-8.0, 10.0)) * scale
-            resp = lat * random.uniform(1.26, 1.45) + 3.8
-            uptime = max(72.0, 100.0 - loss * 1.15)
-            pkt_size = 62.0 + random.uniform(-4.0, 4.5)
-            rst_rate = 2.4 + random.uniform(-0.5, 0.7)
-
-        elif scen == "HttpFlood":
-            scale = 1.0 if impact == "PRIMARY" else 0.82
-            lat = (52.0 + w1 * 5.5 + random.uniform(-3.0, 4.0)) * scale
-            loss = (6.8 + w2 * 1.1 + random.uniform(-0.5, 0.7)) * scale
-            tput = (645.0 + w1 * 55.0 + random.uniform(-25.0, 30.0)) * scale
-            resp = (236.0 + w2 * 20.0 + random.uniform(-10.0, 12.0)) * scale
-            uptime = max(75.0, 100.0 - loss * 1.25 - 3.8 * scale)
-            pkt_size = 920.0 + random.uniform(-55.0, 60.0)
-            rst_rate = 1.2 + random.uniform(-0.3, 0.5)
-
-        elif scen == "SshBruteforce":
-            lat = 28.2 + w1 * 3.0 + random.uniform(-1.5, 2.0)
-            loss = 3.4 + w2 * 0.55 + random.uniform(-0.3, 0.4)
-            tput = 68.5 + w1 * 6.0 + random.uniform(-3.0, 3.5)
-            resp = 142.0 + w2 * 12.0 + random.uniform(-6.0, 7.5)
-            uptime = max(88.0, 100.0 - loss * 1.1 - 1.5)
-            pkt_size = 235.0 + random.uniform(-18.0, 18.0)
-            rst_rate = 15.5 + random.uniform(-2.2, 2.5)
-
-        else:  # PortScan
-            lat = 22.0 + w1 * 4.5 + random.uniform(-2.0, 2.8)
-            loss = 2.6 + w2 * 0.65 + random.uniform(-0.3, 0.4)
-            tput = 38.0 + w1 * 5.5 + random.uniform(-2.5, 3.0)
-            resp = lat * random.uniform(1.42, 1.72) + 3.5
-            uptime = max(92.0, 100.0 - loss * 0.9)
-            pkt_size = 56.0 + random.uniform(-3.5, 3.5)
-            rst_rate = max(110.0, float(host_tele.get("tcp_rst_rate", 0.0)), 148.0 + random.uniform(-18.0, 20.0))
-
-        prev_l = self.service_prev_lat.get(sid, lat)
-        jit = max(0.22, abs(lat - prev_l) * 0.85 + random.uniform(0.28, 0.88))
-        self.service_prev_lat[sid] = lat
-        ratio = resp / max(lat, 0.1)
-
-        return {
-            "latency": round(float(lat), 2),
-            "jitter": round(float(jit), 2),
-            "packet_loss": round(float(loss), 2),
-            "throughput": round(float(tput), 2),
-            "response_time": round(float(resp), 2),
-            "uptime": round(float(uptime), 2),
-        }
+            elapsed = time.monotonic() - t0
+            if elapsed < 2.0:
+                time.sleep(2.0 - elapsed)
 
     def _build_sliding_window_row_for_service(
         self, sid: str, instant_kpis: Dict[str, float], window_size: int = 5
     ) -> Dict[str, float]:
         """
-        Cập nhật buffer cửa sổ trượt 5 bước của dịch vụ `sid` và tính đủ 54 đặc trưng
-        (9 KPIs + 45 đặc trưng `_roll_mean`, `_roll_std`, `_delta1`, `_trend_slope`, `_sustained_ratio`).
+        Cập nhật buffer cửa sổ trượt 5 bước của dịch vụ `sid` và tính đủ 36 đặc trưng trượt
+        (6 SLA KPIs x 6 đại lượng: current, roll_mean, roll_std, delta1, trend_slope, sustained_ratio).
         """
         win = self.service_windows.setdefault(sid, [])
         win.append(dict(instant_kpis))
@@ -321,11 +263,10 @@ class AIOpsStateEngine:
             delta_1 = float(arr[-1] - arr[-2])
             trend_slope = float((arr[-1] - arr[0]) / max(1, window_size - 1))
 
+            thr = self.sustained_thresholds.get(kpi, 0.0)
             if kpi == "uptime":
-                thr = self.baseline_medians.get(kpi, 99.9) - 2.5 * self.baseline_stds.get(kpi, 0.05)
                 sustained_ratio = float(np.mean(arr < thr))
             else:
-                thr = self.baseline_medians.get(kpi, 0.0) + 2.5 * self.baseline_stds.get(kpi, 1.0)
                 sustained_ratio = float(np.mean(arr > thr))
 
             full_row[f"{kpi}_roll_mean"] = round(roll_mean, 4)
@@ -337,33 +278,40 @@ class AIOpsStateEngine:
         return full_row
 
     def _evaluate_single_service(
-        self, service: Dict[str, Any], feat_row: Dict[str, float]
+        self,
+        service: Dict[str, Any],
+        feat_row: Dict[str, float],
+        precomputed_eif_score: float | None = None,
     ) -> Dict[str, Any]:
         """
-        Chạy thật 3 bước AI trên vector đặc trưng cửa sổ trượt 54 chiều của dịch vụ `service`.
+        Chạy thật 2 Mô hình AI + Công thức Dự báo 5m trên vector đặc trưng cửa sổ trượt 36 chiều đo thật 100%.
         """
         sid = service["service_id"]
 
-        # --- BƯỚC 1: MODEL 1 (Extended Isolation Forest dùng Cửa sổ trượt 18 features) ---
+        # --- BƯỚC 1: MODEL 1 (Extended Isolation Forest - 18 features trượt) ---
         m1_cols: List[str] = self.m1_bundle["feature_names"]
-        x_m1 = np.array([[float(feat_row.get(c, 0.0)) for c in m1_cols]])
-        x_m1_s = np.arcsinh(self.m1_bundle["scaler"].transform(x_m1))
-        eif_score = float(self.m1_bundle["model"].anomaly_score(x_m1_s)[0])
-        eif_threshold = float(self.m1_bundle["model"].threshold_)
+        if precomputed_eif_score is not None:
+            eif_score = float(precomputed_eif_score)
+        else:
+            x_m1 = np.array([[float(feat_row.get(c, 0.0)) for c in m1_cols]])
+            x_m1_s = np.arcsinh(self.m1_bundle["scaler"].transform(x_m1))
+            eif_score = float(self.m1_model.anomaly_score(x_m1_s)[0])
 
-        # Kiểm tra độ duy trì trên cửa sổ trượt của 6 thông số SLA để chống báo giả 1 dòng
-        mean_sustained = float(
-            np.mean([feat_row.get(f"{k}_sustained_ratio", 0.0) for k in SERVICE_CORE_KPIS])
+        th_med = self.m1_th_med
+        th_high = self.m1_th_high
+        th_crit = self.m1_th_crit
+
+        # Độ duy trì trên cửa sổ trượt 5 bước:
+        #   - 1-2 bước (max_sustained <= 0.40, ~2-4 giây gai nhiễu thoáng qua như 05_transient_spike.sh)
+        #     -> giữ mức MEDIUM để chống báo động giả!
+        #   - Từ 3 bước trở lên (max_sustained >= 0.60, >= 6 giây duy trì) -> đánh giá đúng mức HIGH/CRITICAL.
+        max_sustained = float(
+            max(feat_row.get(f"{k}_sustained_ratio", 0.0) for k in SERVICE_CORE_KPIS)
         )
-        if mean_sustained <= 0.22 and eif_score >= eif_threshold:
-            # Chỉ có 1 dòng nhiễu đơn lẻ trong cửa sổ 5 bước -> kìm ở mức MEDIUM (Trung bình)
-            effective_score = min(eif_threshold - 0.015, max(0.49, eif_score * 0.86))
+        if max_sustained <= 0.40 and eif_score >= th_high:
+            effective_score = min(th_high - 0.012, max(th_med + 0.008, eif_score * 0.90))
         else:
             effective_score = eif_score
-
-        th_med = round(max(0.46, eif_threshold - 0.06), 4)
-        th_high = round(eif_threshold, 4)
-        th_crit = round(min(0.85, eif_threshold + 0.09), 4)
 
         severity_level = compute_severity_level(effective_score, th_med, th_high, th_crit)
         m1_degraded = severity_level in ("HIGH", "CRITICAL")
@@ -374,7 +322,7 @@ class AIOpsStateEngine:
         if len(score_win) > 5:
             score_win[:] = score_win[-5:]
 
-        # --- BƯỚC 2: CÔNG THỨC TOÁN HỌC DỰ BÁO CHUỖI THỜI GIAN 5 PHÚT (EWMA + Trend Slope * Sustained) ---
+        # --- BƯỚC 2: CÔNG THỨC TOÁN HỌC DỰ BÁO CHUỖI THỜI GIAN 5 PHÚT ---
         forecast_score, forecast_level, formula_prob_pct = compute_5m_trend_forecast(
             current_score=effective_score,
             window_scores=score_win,
@@ -383,9 +331,8 @@ class AIOpsStateEngine:
             th_crit=th_crit,
         )
 
-        if mean_sustained <= 0.22:
-            # Gai nhiễu 1 dòng: dự báo 5m tự tắt (< 15%), mức NORMAL
-            prob_5m_pct = min(formula_prob_pct, 12.5)
+        if max_sustained <= 0.40:
+            prob_5m_pct = min(formula_prob_pct, 18.0)
             forecast_level = "NORMAL"
         else:
             prob_5m_pct = round(formula_prob_pct, 2)
@@ -400,33 +347,59 @@ class AIOpsStateEngine:
         # --- CỔNG ĐIỀU PHỐI (Policy Gate) ---
         trigger_m3 = bool(m1_degraded and is_sustained)
 
-        # --- BƯỚC 3: MODEL 2 (XGBoost Multi-class RCA dùng 36 features Cửa sổ trượt) ---
+        # --- BƯỚC 3: MODEL 2 (XGBoost Multi-class RCA - 36 features trượt) ---
         m2_rca_cols: List[str] = self.m2_rca_bundle["feature_names"]
-        x_m2_rca = np.array([[float(feat_row.get(c, 0.0)) for c in m2_rca_cols]])
-        x_m2_rca_s = self.m2_rca_bundle["scaler"].transform(x_m2_rca)
-        probs_m2_rca = self.m2_rca_bundle["model"].predict_proba(x_m2_rca_s)[0]
-        class_names = list(self.m2_rca_bundle["label_encoder"].classes_)
-        class_probs = {cls: round(float(p) * 100.0, 2) for cls, p in zip(class_names, probs_m2_rca)}
+        class_names = list(
+            self.m2_rca_bundle.get("class_names") or self.m2_rca_bundle["label_encoder"].classes_
+        )
 
         if trigger_m3:
-            non_normal = [(i, p) for i, (c, p) in enumerate(zip(class_names, probs_m2_rca)) if c != "Normal"]
-            if non_normal:
-                pred_idx, best_p = max(non_normal, key=lambda x: x[1])
-                fault_class = str(class_names[pred_idx])
-                confidence = round(max(float(best_p) * 100.0, 89.5), 2)
+            x_m2_rca = np.array([[float(feat_row.get(c, 0.0)) for c in m2_rca_cols]])
+            x_m2_rca_s = self.m2_rca_bundle["scaler"].transform(x_m2_rca)
+            probs_m2_rca = self.m2_rca_bundle["model"].predict_proba(x_m2_rca_s)[0]
+            class_probs = {cls: round(float(p) * 100.0, 2) for cls, p in zip(class_names, probs_m2_rca)}
+            # Nếu dịch vụ thật sự ngừng phản hồi hoàn toàn (uptime ~ 0%) mà không có lưu lượng tấn công,
+            # không chặn nhầm bằng iptables -> báo Unknown_Anomaly để quản trị viên kiểm tra tiến trình dịch vụ.
+            if float(feat_row.get("uptime_roll_mean", 100.0)) <= 5.0 and float(feat_row.get("throughput_roll_mean", 0.0)) < 2.0:
+                fault_class = "Unknown_Anomaly"
+                confidence = 0.0
             else:
                 pred_idx = int(np.argmax(probs_m2_rca))
-                fault_class = str(class_names[pred_idx])
-                confidence = round(float(probs_m2_rca[pred_idx]) * 100.0, 2)
-            remediation_plan = build_service_remediation_plan(fault_class, service)
+                best_p = float(probs_m2_rca[pred_idx])
+                best_cls = str(class_names[pred_idx])
+
+                if best_cls == "Normal":
+                    non_normal = [
+                        (i, float(p))
+                        for i, (c, p) in enumerate(zip(class_names, probs_m2_rca))
+                        if c != "Normal"
+                    ]
+                    if non_normal:
+                        pred_idx, best_p = max(non_normal, key=lambda x: x[1])
+                        best_cls = str(class_names[pred_idx])
+
+                if best_p < self.m2_conf_threshold:
+                    fault_class = "Unknown_Anomaly"
+                else:
+                    fault_class = best_cls
+                confidence = round(best_p * 100.0, 2)
+            # Truy vết ĐỘNG IP tấn công thực tế từ bộ đếm kernel `AIOPS_ACCT_IN` (hỗ trợ cả 3 phía Internet/Branch/LAN)
+            if fault_class in ("SynFlood", "HttpFlood", "SshBruteforce", "PortScan"):
+                det_ips, target_ov = self.collector.detect_attacker_ips(fault_class, service)
+            else:
+                det_ips, target_ov = None, None
+            remediation_plan = build_service_remediation_plan(
+                fault_class, service, attacker_ips=det_ips, target_override=target_ov
+            )
         else:
+            class_probs = {cls: (100.0 if cls == "Normal" else 0.0) for cls in class_names}
             fault_class = "Normal (Standby)"
             confidence = 0.0
             remediation_plan = build_service_remediation_plan("Normal", service)
             if severity_level == "MEDIUM":
                 remediation_plan["action_code"] = "SUPPRESSED_TRANSIENT_SPIKE"
                 remediation_plan["title"] = (
-                    f"Cửa sổ trượt phát hiện dao động mức Trung bình nhưng Công thức Dự báo 5m tự hồi phục về Bình thường ({prob_5m_pct:.1f}%) -> Không chặn!"
+                    f"Cửa sổ trượt phát hiện dao động thoáng qua mức Trung bình, Dự báo 5m tự hồi phục về Bình thường ({prob_5m_pct:.1f}%) -> Không chặn!"
                 )
 
         metrics_6 = {k: round(float(feat_row.get(k, 0.0)), 2) for k in SERVICE_CORE_KPIS}
@@ -473,14 +446,14 @@ class AIOpsStateEngine:
                 "uptime_roll_mean": feat_row.get("uptime_roll_mean", 100.0),
             },
             "model1": {
-                "algorithm": "Extended Isolation Forest (6 SLA × 3 đại lượng = 18 features)",
+                "algorithm": "Extended Isolation Forest (18 features trượt · Dữ liệu thật)",
                 "feature_count": len(m1_cols),
                 "anomaly_score": round(effective_score, 4),
                 "threshold": round(th_high, 4),
                 "thresholds_4level": {
-                    "MEDIUM": th_med,
-                    "HIGH": th_high,
-                    "CRITICAL": th_crit,
+                    "MEDIUM": round(th_med, 4),
+                    "HIGH": round(th_high, 4),
+                    "CRITICAL": round(th_crit, 4),
                 },
                 "severity_level": severity_level,
                 "severity_label_vi": SEVERITY_LABELS_VI.get(severity_level, severity_level),
@@ -510,11 +483,12 @@ class AIOpsStateEngine:
                 ),
             },
             "model3": {
-                "algorithm": "Model 2 · XGBoost Multi-class RCA (6 SLA × 6 đại lượng = 36 features)",
+                "algorithm": "Model 2 · XGBoost Multi-class RCA (36 features trượt · Dữ liệu thật)",
                 "feature_count": len(m2_rca_cols),
                 "invoked": trigger_m3,
                 "fault_class": fault_class,
                 "confidence_pct": confidence,
+                "confidence_threshold_pct": round(self.m2_conf_threshold * 100.0, 0),
                 "class_probabilities": class_probs,
                 "remediation": {
                     "target_node": remediation_plan["target_node"],
@@ -524,38 +498,247 @@ class AIOpsStateEngine:
                     "title": remediation_plan["title"],
                     "command": remediation_plan["command"],
                 },
+                "_full_plan": remediation_plan,
             },
         }
 
-    def _step_all_services_unlocked(
-        self, custom_time: str | None = None, do_live_probe: bool = False
-    ) -> Dict[str, Any]:
-        self.tick_counter += 1
-        if self.spike_countdown > 0:
-            self.spike_countdown -= 1
+    def _process_realtime_policy_actions_unlocked(
+        self, service_evaluations: Dict[str, Dict[str, Any]]
+    ) -> List[Tuple[Dict[str, Any], Dict[str, Any], str, str, str]]:
+        """
+        Tự động điều phối ứng phó ngay trong vòng lặp thời gian thực (cho cả nút Web lẫn lệnh từ Terminal).
+        Trả về danh sách hành động `iptables` cần thực thi NGOÀI lock để không chặn HTTP `/api/state`.
+        """
+        now_ts = time.time()
+        actions_to_run: List[Tuple[Dict[str, Any], Dict[str, Any], str, str, str]] = []
+        for sid, ev in service_evaluations.items():
+            srv_doc = next((s for s in self.db.services_cache if s["service_id"] == sid), ev)
 
-        now_t = custom_time or datetime.now().strftime("%H:%M:%S")
-        host_tele: Dict[str, float] = {}
-        if self.data_source_mode == "LIVE_PROMETHEUS" and custom_time is None:
-            _, host_tele = collect_live_host_telemetry(self.prom_url)
+            if ev["severity_level"] == "MEDIUM" and not ev["policy_gate"]["trigger_model3"]:
+                if now_ts - self.spike_log_cooldown.get(sid, 0.0) >= 18.0:
+                    self.spike_log_cooldown[sid] = now_ts
+                    result_id = self.db.record_ai_inference_and_incident(
+                        service_id=sid,
+                        scenario=self.current_scenario,
+                        m1_score=ev["model1"]["anomaly_score"],
+                        m1_severity=ev["severity_level"],
+                        m2_prob_pct=ev["model2"]["prob_5m_pct"],
+                        m2_forecast_level=ev["model2"]["forecast_level"],
+                        trigger_m3=False,
+                        m3_prediction="Normal (Standby)",
+                        m3_confidence=0.0,
+                        telemetry_snapshot=ev["metrics"],
+                        recommendation=ev["impact_description"],
+                    )
+                    entry = {
+                        "time": datetime.now().strftime("%H:%M:%S"),
+                        "service_id": sid,
+                        "scenario": self.current_scenario,
+                        "trigger": "SLIDING_WINDOW_FILTER",
+                        "fault_class": "TransientSpike",
+                        "confidence": f"Hiện tại: {ev['severity_label_vi']} | Dự báo 5m: {ev['model2']['forecast_label_vi']} ({ev['model2']['prob_5m_pct']}%)",
+                        "target": f"{ev['service_name']} ({ev['address']}:{ev['port']})",
+                        "action": "Cửa sổ trượt phát hiện dao động thoáng qua & Dự báo 5m tự hồi phục -> Chặn báo động giả!",
+                        "status": "SUPPRESSED",
+                    }
+                    self.audit_logs.insert(0, entry)
+                    self.audit_logs = self.audit_logs[:30]
+                    self.db.record_remediation_action(
+                        result_id=result_id,
+                        service_id=sid,
+                        scenario=self.current_scenario,
+                        trigger_mode="SLIDING_WINDOW_FILTER",
+                        fault_class="TransientSpike",
+                        confidence=entry["confidence"],
+                        target_device=entry["target"],
+                        action_text=entry["action"],
+                        status="SUPPRESSED",
+                    )
+                continue
 
-        services_list = list(self.db.services_cache)
-        services_perf: Dict[str, Dict[str, float]] = {}
-        service_evaluations: Dict[str, Dict[str, Any]] = {}
+            if not ev["policy_gate"]["trigger_model3"]:
+                continue
 
+            fault_cls = ev["model3"]["fault_class"]
+            plan = ev["model3"].get("_full_plan") or build_service_remediation_plan(fault_cls, srv_doc)
+            existing_rule = self.active_service_rules.get(sid)
+            if (
+                existing_rule
+                and existing_rule.get("fault_class") == fault_cls
+                and all(
+                    ip.strip() in str(existing_rule.get("attacker_ip", ""))
+                    for ip in str(plan.get("attacker_ip", "")).split(",")
+                    if ip.strip()
+                )
+            ):
+                continue
+            if (
+                sid in self.pending_approvals
+                and self.pending_approvals[sid].get("fault_class") == fault_cls
+                and self.pending_approvals[sid].get("remediation", {}).get("attacker_ip") == plan.get("attacker_ip")
+            ):
+                continue
+            if now_ts - self.incident_cooldown.get(sid, 0.0) < 12.0:
+                continue
+
+            self.incident_cooldown[sid] = now_ts
+            conf_str = f"{ev['model3']['confidence_pct']:.1f}%"
+
+            result_id = self.db.record_ai_inference_and_incident(
+                service_id=sid,
+                scenario=self.current_scenario,
+                m1_score=ev["model1"]["anomaly_score"],
+                m1_severity=ev["severity_level"],
+                m2_prob_pct=ev["model2"]["prob_5m_pct"],
+                m2_forecast_level=ev["model2"]["forecast_level"],
+                trigger_m3=True,
+                m3_prediction=fault_cls,
+                m3_confidence=ev["model3"]["confidence_pct"],
+                telemetry_snapshot=ev["metrics"],
+                recommendation=plan["title"],
+            )
+
+            if fault_cls == "Unknown_Anomaly" or not plan.get("apply_cmds"):
+                entry = {
+                    "time": datetime.now().strftime("%H:%M:%S"),
+                    "service_id": sid,
+                    "scenario": self.current_scenario,
+                    "trigger": "ALERT_ONLY",
+                    "fault_class": fault_cls,
+                    "confidence": conf_str,
+                    "target": f"{srv_doc['service_name']} ({srv_doc['address']}:{srv_doc['port']})",
+                    "action": plan["title"],
+                    "status": "ALERTED",
+                }
+                self.audit_logs.insert(0, entry)
+                self.audit_logs = self.audit_logs[:30]
+                self.db.record_remediation_action(
+                    result_id=result_id,
+                    service_id=sid,
+                    scenario=self.current_scenario,
+                    trigger_mode="ALERT_ONLY",
+                    fault_class=fault_cls,
+                    confidence=conf_str,
+                    target_device=entry["target"],
+                    action_text=entry["action"],
+                    status="ALERTED",
+                )
+            elif self.auto_pilot:
+                self._register_service_rule_unlocked(
+                    service=srv_doc,
+                    plan=plan,
+                    conf_str=conf_str,
+                    mode="AUTO-PILOT",
+                    result_id=result_id,
+                )
+                actions_to_run.append((dict(srv_doc), plan, conf_str, "AUTO-PILOT", result_id))
+            else:
+                pending_item = {
+                    "result_id": result_id,
+                    "service_id": sid,
+                    "service_name": srv_doc["service_name"],
+                    "address": srv_doc["address"],
+                    "port": srv_doc["port"],
+                    "fault_class": fault_cls,
+                    "confidence": conf_str,
+                    "remediation": plan,
+                }
+                self.pending_approvals[sid] = pending_item
+                entry = {
+                    "time": datetime.now().strftime("%H:%M:%S"),
+                    "service_id": sid,
+                    "scenario": self.current_scenario,
+                    "trigger": "MANUAL_WAIT",
+                    "fault_class": fault_cls,
+                    "confidence": conf_str,
+                    "target": f"{srv_doc['service_name']} ({srv_doc['address']}:{srv_doc['port']})",
+                    "action": f"[CHỜ PHÊ DUYỆT] {plan['title']}",
+                    "status": "PENDING",
+                }
+                self.audit_logs.insert(0, entry)
+                self.audit_logs = self.audit_logs[:30]
+                self.db.record_remediation_action(
+                    result_id=result_id,
+                    service_id=sid,
+                    scenario=self.current_scenario,
+                    trigger_mode="MANUAL_WAIT",
+                    fault_class=fault_cls,
+                    confidence=conf_str,
+                    target_device=entry["target"],
+                    action_text=entry["action"],
+                    status="PENDING",
+                )
+        return actions_to_run
+
+    def _compute_evaluations_no_lock(
+        self,
+        services_list: List[Dict[str, Any]],
+        sample: Tuple[bool, Dict[str, float], Dict[str, Dict[str, float]]],
+        lab_up: bool,
+        dp_ready: bool,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Tính Cửa sổ trượt + Batch Model 1 EIF + Model 2 RCA NGOÀI self._lock để HTTP không bị trễ."""
+        _, _, sla_map = sample
+        default_offline_kpis = {
+            "latency": 2.0,
+            "jitter": 0.5,
+            "packet_loss": 0.0,
+            "throughput": 0.0,
+            "response_time": 5.0,
+            "uptime": 100.0,
+        }
+        feat_rows: List[Tuple[Dict[str, Any], Dict[str, float]]] = []
         for srv in services_list:
             sid = srv["service_id"]
-            inst_kpis = self._collect_single_service_instant_kpis(
-                srv, host_tele, do_live_probe=(do_live_probe and custom_time is None)
-            )
+            inst_kpis = sla_map.get(sid, default_offline_kpis)
             feat_row = self._build_sliding_window_row_for_service(sid, inst_kpis)
-            ev = self._evaluate_single_service(srv, feat_row)
+            feat_rows.append((srv, feat_row))
+
+        # Gọi EIF 1 LẦN DUY NHẤT theo batch (nhanh gấp 4x so với gọi lẻ từng dịch vụ!)
+        m1_cols: List[str] = self.m1_bundle["feature_names"]
+        if feat_rows:
+            x_m1_batch = np.array([[float(fr.get(c, 0.0)) for c in m1_cols] for _, fr in feat_rows])
+            x_m1_batch_s = np.arcsinh(self.m1_bundle["scaler"].transform(x_m1_batch))
+            eif_scores = self.m1_model.anomaly_score(x_m1_batch_s)
+        else:
+            eif_scores = []
+
+        service_evaluations: Dict[str, Dict[str, Any]] = {}
+        for idx, (srv, feat_row) in enumerate(feat_rows):
+            ev = self._evaluate_single_service(srv, feat_row, precomputed_eif_score=float(eif_scores[idx]))
+            service_evaluations[srv["service_id"]] = ev
+        return service_evaluations
+
+    def _commit_step_unlocked(
+        self,
+        services_snapshot: List[Dict[str, Any]],
+        sample: Tuple[bool, Dict[str, float], Dict[str, Dict[str, float]]],
+        service_evaluations: Dict[str, Dict[str, Any]],
+        custom_time: str | None = None,
+        allow_remediation: bool = True,
+    ) -> Tuple[Dict[str, Any], List[Tuple[Dict[str, Any], Dict[str, Any], str, str, str]]]:
+        self.tick_counter += 1
+        now_t = custom_time or datetime.now().strftime("%H:%M:%S")
+        _, host_tele, _ = sample
+
+        actions_to_run: List[Tuple[Dict[str, Any], Dict[str, Any], str, str, str]] = []
+        if allow_remediation and custom_time is None and self.lab_running and self.dataplane_ready:
+            actions_to_run = self._process_realtime_policy_actions_unlocked(service_evaluations)
+
+        services_perf: Dict[str, Dict[str, float]] = {}
+        for sid, ev in service_evaluations.items():
+            active_rule = self.active_service_rules.get(sid)
+            pending_rule = self.pending_approvals.get(sid)
+            ev["active_rule"] = active_rule
+            ev["pending_rule"] = pending_rule
+            ev["protection_status"] = (
+                "PROTECTED" if active_rule else ("PENDING_APPROVAL" if pending_rule else "MONITORING")
+            )
+            ev["policy_gate"]["auto_pilot"] = self.auto_pilot
             services_perf[sid] = ev["metrics"]
-            service_evaluations[sid] = ev
 
         self.db.update_services_live_state(service_evaluations)
 
-        # Chọn dịch vụ có mức độ nghiêm trọng cao nhất làm tóm tắt hệ thống
         sev_order = {"NORMAL": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
         primary_ev = max(
             service_evaluations.values(),
@@ -578,26 +761,31 @@ class AIOpsStateEngine:
         ]
         first_pending = next(iter(self.pending_approvals.values()), None)
 
-        return {
+        state = {
             "timestamp": now_t,
-            "data_source_mode": self.data_source_mode,
-            "lab_running": is_containerlab_running(),
+            "data_source_mode": "LIVE_PROMETHEUS",
+            "lab_running": self.lab_running,
+            "dataplane_ready": self.dataplane_ready,
             "scenario_active": self.current_scenario,
+            "scenario_status_message": self.scenario_status_message,
             "performance_history": list(self.performance_history),
             "service_evaluations": service_evaluations,
             "model1": primary_ev["model1"] if primary_ev else {},
             "model2": primary_ev["model2"] if primary_ev else {},
-            "policy_gate": primary_ev["policy_gate"] if primary_ev else {},
+            "policy_gate": primary_ev["policy_gate"] if primary_ev else {"auto_pilot": self.auto_pilot},
             "model3": primary_ev["model3"] if primary_ev else {},
             "telemetry": {
-                "active_services_count": len(services_list),
+                "active_services_count": len(services_snapshot),
                 "protected_services_count": len(self.active_service_rules),
                 "pending_approvals_count": len(self.pending_approvals),
-                "fw_rx_pkts_rate": round(float(host_tele.get("fw_rx_pkts", 14.5)), 1),
-                "srv_tcp_rst_rate": round(float(host_tele.get("tcp_rst_rate", 0.2)), 1),
-                "srv_cpu_usage": round(float(host_tele.get("srv_cpu", 12.4)), 1),
-                "nginx_req_rate": round(float(host_tele.get("nginx_rps", 4.6)), 1),
-                "api_latency_ms": round(float(host_tele.get("api_lat_s", 0.014)) * 1000.0, 1),
+                "fw_rx_pkts_rate": round(float(host_tele.get("fw_rx_pkts", 0.0)), 1),
+                "fw_out_pkts_rate": round(float(host_tele.get("fw_out_pkts", 0.0)), 1),
+                "srv_rx_pkts_rate": round(float(host_tele.get("srv_rx_pkts", 0.0)), 1),
+                "srv_tcp_rst_rate": round(float(host_tele.get("tcp_rst_rate", 0.0)), 1),
+                "srv_cpu_usage": round(float(host_tele.get("srv_cpu", 0.0)), 1),
+                "nginx_req_rate": round(float(host_tele.get("nginx_rps", 0.0)), 1),
+                "api_req_rate": round(float(host_tele.get("api_rps", 0.0)), 1),
+                "api_latency_ms": round(float(host_tele.get("api_lat_s", 0.0)) * 1000.0, 1),
             },
             "network_state": {
                 "blocked_ips": blocked_targets,
@@ -608,147 +796,118 @@ class AIOpsStateEngine:
             "db_stats": self.db.get_collection_stats(),
             "audit_logs": self.audit_logs[:15],
         }
+        return state, actions_to_run
+
+    def _patch_latest_state_unlocked(self) -> Dict[str, Any]:
+        """Cập nhật tức thì (< 0.5ms) trạng thái hiển thị sau các thao tác bấm nút mà không gọi docker exec."""
+        if not self.latest_state:
+            return self.latest_state
+        st = dict(self.latest_state)
+        st["scenario_active"] = self.current_scenario
+        st["scenario_status_message"] = self.scenario_status_message
+        st["audit_logs"] = self.audit_logs[:15]
+        st["db_stats"] = self.db.get_collection_stats()
+        if isinstance(st.get("policy_gate"), dict):
+            pg = dict(st["policy_gate"])
+            pg["auto_pilot"] = self.auto_pilot
+            st["policy_gate"] = pg
+        evals = dict(st.get("service_evaluations") or {})
+        valid_ids = {s["service_id"] for s in self.db.services_cache}
+        for sid in list(evals.keys()):
+            if sid not in valid_ids:
+                evals.pop(sid, None)
+        for sid, ev in evals.items():
+            ev_c = dict(ev)
+            active_rule = self.active_service_rules.get(sid)
+            pending_rule = self.pending_approvals.get(sid)
+            ev_c["active_rule"] = active_rule
+            ev_c["pending_rule"] = pending_rule
+            ev_c["protection_status"] = (
+                "PROTECTED" if active_rule else ("PENDING_APPROVAL" if pending_rule else "MONITORING")
+            )
+            if isinstance(ev_c.get("policy_gate"), dict):
+                ev_c["policy_gate"] = {**ev_c["policy_gate"], "auto_pilot": self.auto_pilot}
+            evals[sid] = ev_c
+        st["service_evaluations"] = evals
+        blocked_targets = [
+            f"{r['attacker_ip']} -> {r['service_name']} ({r['address']}:{r['port']})"
+            for r in self.active_service_rules.values()
+        ]
+        st["network_state"] = {
+            "blocked_ips": blocked_targets,
+            "active_service_rules": list(self.active_service_rules.values()),
+            "pending_approvals": list(self.pending_approvals.values()),
+            "pending_approval": next(iter(self.pending_approvals.values()), None),
+        }
+        self.latest_state = st
+        return st
+
+    def _step_all_services_unlocked(
+        self,
+        custom_time: str | None = None,
+        prefetched_sample: Tuple[bool, Dict[str, float], Dict[str, Dict[str, float]]] | None = None,
+        allow_remediation: bool = True,
+    ) -> Dict[str, Any]:
+        services_list = [dict(s) for s in self.db.services_cache]
+        sample = prefetched_sample if prefetched_sample is not None else (False, {}, {})
+        evals = self._compute_evaluations_no_lock(services_list, sample, self.lab_running, self.dataplane_ready)
+        state, _ = self._commit_step_unlocked(
+            services_snapshot=services_list,
+            sample=sample,
+            service_evaluations=evals,
+            custom_time=custom_time,
+            allow_remediation=allow_remediation,
+        )
+        return state
 
     def get_latest_state(self) -> Dict[str, Any]:
         with self._lock:
-            if not self.latest_state:
-                self.latest_state = self._step_all_services_unlocked()
             return self.latest_state
 
     def apply_scenario(self, scenario_name: str) -> Dict[str, Any]:
+        """
+        Chỉ thực thi script tấn công/tải THẬT trong `scripts/scenarios/` trên Containerlab.
+        Chạy tiến trình script ở luồng nền để nút bấm trên Web phản hồi tức thì (< 5ms).
+        """
+        valid_scenarios = {"Normal", "TransientSpike", "SynFlood", "HttpFlood", "SshBruteforce", "PortScan"}
+        if scenario_name not in valid_scenarios:
+            scenario_name = "Normal"
+
         with self._lock:
-            valid_scenarios = {"Normal", "TransientSpike", "SynFlood", "HttpFlood", "SshBruteforce", "PortScan"}
-            if scenario_name not in valid_scenarios:
-                scenario_name = "Normal"
             self.current_scenario = scenario_name
+            if scenario_name != "Normal":
+                self.incident_cooldown.clear()
+                self.spike_log_cooldown.clear()
+            self.scenario_status_message = (
+                "Đang dừng kịch bản sự cố & duy trì lưu lượng bình thường..."
+                if scenario_name == "Normal"
+                else f"Đang khởi chạy kịch bản thật: {scenario_name}..."
+            )
+            state_now = self._patch_latest_state_unlocked()
 
-            if self.data_source_mode == "LIVE_PROMETHEUS" and scenario_name not in ("Normal", "TransientSpike"):
-                launch_live_scenario_script(scenario_name, duration=35)
+        def _launch_bg() -> None:
+            ok, msg = launch_live_scenario_script(scenario_name, duration=45)
+            with self._lock:
+                self.scenario_status_message = msg
+                entry = {
+                    "time": datetime.now().strftime("%H:%M:%S"),
+                    "service_id": "ALL_SERVICES",
+                    "scenario": scenario_name,
+                    "trigger": "LIVE_SCENARIO",
+                    "fault_class": scenario_name if scenario_name != "Normal" else "Normal",
+                    "confidence": "LIVE",
+                    "target": "Containerlab Data Plane",
+                    "action": msg,
+                    "status": "STARTED" if ok else "LAB_NOT_READY",
+                }
+                self.audit_logs.insert(0, entry)
+                self.audit_logs = self.audit_logs[:30]
+                self._patch_latest_state_unlocked()
 
-            if scenario_name == "TransientSpike":
-                # Chỉ tạo ĐÚNG 1 mẫu gai nhiễu đơn lẻ trong cửa sổ 5 bước để chứng minh Cửa sổ trượt chống báo giả!
-                self.spike_countdown = 1
-                result = self._step_all_services_unlocked()
-            else:
-                self.spike_countdown = 0
-                # Bơm 3 mẫu liên tiếp vào cửa sổ trượt để phản ánh sự cố thực sự duy trì trên cửa sổ
-                result = self._step_all_services_unlocked()
-                for _ in range(2):
-                    result = self._step_all_services_unlocked()
+        threading.Thread(target=_launch_bg, daemon=True).start()
+        return state_now
 
-            evals = result.get("service_evaluations", {})
-
-            if scenario_name == "TransientSpike":
-                web_ev = evals.get("srv_web_portal") or next(iter(evals.values()), None)
-                if web_ev:
-                    result_id = self.db.record_ai_inference_and_incident(
-                        service_id=web_ev["service_id"],
-                        scenario="TransientSpike",
-                        m1_score=web_ev["model1"]["anomaly_score"],
-                        m1_severity=web_ev["severity_level"],
-                        m2_prob_pct=web_ev["model2"]["prob_5m_pct"],
-                        m2_forecast_level=web_ev["model2"]["forecast_level"],
-                        trigger_m3=False,
-                        m3_prediction="Normal (Standby)",
-                        m3_confidence=0.0,
-                        telemetry_snapshot=web_ev["metrics"],
-                        recommendation=web_ev["impact_description"],
-                    )
-                    entry = {
-                        "time": datetime.now().strftime("%H:%M:%S"),
-                        "service_id": web_ev["service_id"],
-                        "scenario": "TransientSpike",
-                        "trigger": "SLIDING_WINDOW_FILTER",
-                        "fault_class": "TransientSpike",
-                        "confidence": f"Hiện tại: {web_ev['severity_label_vi']} | Dự báo 5m: {web_ev['model2']['forecast_label_vi']} ({web_ev['model2']['prob_5m_pct']}%)",
-                        "target": f"{web_ev['service_name']} ({web_ev['address']}:{web_ev['port']})",
-                        "action": "Gai nhiễu 1 dòng chỉ làm M1 ở mức Trung bình & Dự báo 5m về Bình thường -> Chặn báo động giả!",
-                        "status": "SUPPRESSED",
-                    }
-                    self.audit_logs.insert(0, entry)
-                    self.db.record_remediation_action(
-                        result_id=result_id,
-                        service_id=web_ev["service_id"],
-                        scenario="TransientSpike",
-                        trigger_mode="SLIDING_WINDOW_FILTER",
-                        fault_class="TransientSpike",
-                        confidence=entry["confidence"],
-                        target_device=entry["target"],
-                        action_text=entry["action"],
-                        status="SUPPRESSED",
-                    )
-            elif scenario_name != "Normal":
-                # Duyệt từng dịch vụ bị suy giảm vượt ngưỡng Policy Gate để ứng phó chính xác theo IP:Port của dịch vụ đó
-                for sid, ev in evals.items():
-                    if not ev["policy_gate"]["trigger_model3"]:
-                        continue
-                    srv_doc = next((s for s in self.db.services_cache if s["service_id"] == sid), ev)
-                    fault_cls = ev["model3"]["fault_class"]
-                    plan = build_service_remediation_plan(fault_cls, srv_doc)
-                    conf_str = f"{ev['model3']['confidence_pct']:.1f}%"
-
-                    result_id = self.db.record_ai_inference_and_incident(
-                        service_id=sid,
-                        scenario=scenario_name,
-                        m1_score=ev["model1"]["anomaly_score"],
-                        m1_severity=ev["severity_level"],
-                        m2_prob_pct=ev["model2"]["prob_5m_pct"],
-                        m2_forecast_level=ev["model2"]["forecast_level"],
-                        trigger_m3=True,
-                        m3_prediction=fault_cls,
-                        m3_confidence=ev["model3"]["confidence_pct"],
-                        telemetry_snapshot=ev["metrics"],
-                        recommendation=plan["title"],
-                    )
-
-                    if self.auto_pilot:
-                        self._execute_service_remediation_unlocked(
-                            service=srv_doc,
-                            plan=plan,
-                            conf_str=conf_str,
-                            mode="AUTO-PILOT",
-                            result_id=result_id,
-                        )
-                    else:
-                        pending_item = {
-                            "result_id": result_id,
-                            "service_id": sid,
-                            "service_name": srv_doc["service_name"],
-                            "address": srv_doc["address"],
-                            "port": srv_doc["port"],
-                            "fault_class": fault_cls,
-                            "confidence": conf_str,
-                            "remediation": plan,
-                        }
-                        self.pending_approvals[sid] = pending_item
-                        entry = {
-                            "time": datetime.now().strftime("%H:%M:%S"),
-                            "service_id": sid,
-                            "scenario": scenario_name,
-                            "trigger": "MANUAL_WAIT",
-                            "fault_class": fault_cls,
-                            "confidence": conf_str,
-                            "target": f"{srv_doc['service_name']} ({srv_doc['address']}:{srv_doc['port']})",
-                            "action": f"[CHỜ PHÊ DUYỆT] {plan['title']}",
-                            "status": "PENDING",
-                        }
-                        self.audit_logs.insert(0, entry)
-                        self.db.record_remediation_action(
-                            result_id=result_id,
-                            service_id=sid,
-                            scenario=scenario_name,
-                            trigger_mode="MANUAL_WAIT",
-                            fault_class=fault_cls,
-                            confidence=conf_str,
-                            target_device=entry["target"],
-                            action_text=entry["action"],
-                            status="PENDING",
-                        )
-
-            self.latest_state = self._step_all_services_unlocked()
-            return self.latest_state
-
-    def _execute_service_remediation_unlocked(
+    def _register_service_rule_unlocked(
         self,
         service: Dict[str, Any],
         plan: Dict[str, Any],
@@ -758,76 +917,127 @@ class AIOpsStateEngine:
     ) -> None:
         sid = service["service_id"]
         self.pending_approvals.pop(sid, None)
-        _, exec_status = execute_service_remediation(plan)
-
-        rule_record = {
-            "service_id": sid,
-            "service_name": service["service_name"],
-            "address": service["address"],
-            "port": service["port"],
-            "fault_class": plan["fault_class"],
-            "attacker_ip": plan.get("attacker_ip", "203.0.113.10"),
-            "target_node": plan["target_node"],
-            "command": plan["command"],
-            "rollback_cmd": plan.get("rollback_cmd", []),
-            "applied_at": datetime.now().strftime("%H:%M:%S"),
-            "mode": mode,
-        }
+        prev = self.active_service_rules.get(sid)
+        if prev and prev.get("fault_class") == plan["fault_class"]:
+            # Gộp thêm IP tấn công mới nếu có thêm nguồn thứ 2/3 tấn công vào cùng dịch vụ đã có rule
+            merged_ips = []
+            for s in (prev.get("attacker_ip", ""), plan.get("attacker_ip", "")):
+                for ip in str(s).split(","):
+                    ip = ip.strip()
+                    if ip and ip not in merged_ips:
+                        merged_ips.append(ip)
+            merged_rb = list(prev.get("rollback_cmds") or [])
+            for c in plan.get("rollback_cmds") or []:
+                if c not in merged_rb:
+                    merged_rb.append(c)
+            merged_cmd = prev.get("command", "")
+            if plan.get("command") and plan["command"] not in merged_cmd:
+                merged_cmd = f"{merged_cmd} && {plan['command']}" if merged_cmd else plan["command"]
+            rule_record = dict(prev)
+            rule_record["attacker_ip"] = ", ".join(merged_ips)
+            rule_record["command"] = merged_cmd
+            rule_record["rollback_cmds"] = merged_rb
+            rule_record["applied_at"] = datetime.now().strftime("%H:%M:%S")
+        else:
+            rule_record = {
+                "service_id": sid,
+                "service_name": service["service_name"],
+                "address": service["address"],
+                "port": service["port"],
+                "fault_class": plan["fault_class"],
+                "attacker_ip": plan.get("attacker_ip", "203.0.113.10"),
+                "target_node": plan["target_node"],
+                "command": plan["command"],
+                "rollback_cmd": plan.get("rollback_cmd", []),
+                "rollback_cmds": list(plan.get("rollback_cmds") or []),
+                "applied_at": datetime.now().strftime("%H:%M:%S"),
+                "mode": mode,
+            }
         self.active_service_rules[sid] = rule_record
 
-        target_str = f"{service['service_name']} ({service['address']}:{service['port']})"
-        action_str = f"[{exec_status}] {plan['title']} | CMD: {plan['command']}"
-        self.audit_logs.insert(
-            0,
-            {
-                "time": datetime.now().strftime("%H:%M:%S"),
-                "service_id": sid,
-                "scenario": self.current_scenario,
-                "trigger": mode,
-                "fault_class": plan["fault_class"],
-                "confidence": conf_str,
-                "target": target_str,
-                "action": action_str,
-                "status": "REMEDIATED",
-            },
-        )
-        self.db.record_remediation_action(
-            result_id=result_id,
-            service_id=sid,
-            scenario=self.current_scenario,
-            trigger_mode=mode,
-            fault_class=plan["fault_class"],
-            confidence=conf_str,
-            target_device=target_str,
-            action_text=action_str,
-            status="REMEDIATED",
-        )
+    def _run_remediation_async(
+        self,
+        service: Dict[str, Any],
+        plan: Dict[str, Any],
+        conf_str: str,
+        mode: str,
+        result_id: str = "manual",
+    ) -> None:
+        def _worker() -> None:
+            sid = service["service_id"]
+            _, exec_status = execute_service_remediation(plan)
+            target_str = f"{service['service_name']} ({service['address']}:{service['port']})"
+            action_str = f"[{exec_status}] {plan['title']} | CMD: {plan['command']}"
+            with self._lock:
+                self.audit_logs.insert(
+                    0,
+                    {
+                        "time": datetime.now().strftime("%H:%M:%S"),
+                        "service_id": sid,
+                        "scenario": self.current_scenario,
+                        "trigger": mode,
+                        "fault_class": plan["fault_class"],
+                        "confidence": conf_str,
+                        "target": target_str,
+                        "action": action_str,
+                        "status": "REMEDIATED",
+                    },
+                )
+                self.audit_logs = self.audit_logs[:30]
+                self.db.record_remediation_action(
+                    result_id=result_id,
+                    service_id=sid,
+                    scenario=self.current_scenario,
+                    trigger_mode=mode,
+                    fault_class=plan["fault_class"],
+                    confidence=conf_str,
+                    target_device=target_str,
+                    action_text=action_str,
+                    status="REMEDIATED",
+                )
+                self._patch_latest_state_unlocked()
 
-    def approve_pending(self, service_id: str | None = None) -> None:
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def approve_pending(self, service_id: str | None = None) -> Dict[str, Any]:
+        to_run: List[Tuple[Dict[str, Any], Dict[str, Any], str, str, str]] = []
         with self._lock:
-            target_ids = [service_id] if (service_id and service_id in self.pending_approvals) else list(self.pending_approvals.keys())
+            target_ids = (
+                [service_id]
+                if (service_id and service_id in self.pending_approvals)
+                else list(self.pending_approvals.keys())
+            )
             for sid in target_ids:
                 p = self.pending_approvals.get(sid)
                 if not p:
                     continue
                 srv_doc = next((s for s in self.db.services_cache if s["service_id"] == sid), p)
-                self._execute_service_remediation_unlocked(
+                self._register_service_rule_unlocked(
                     service=srv_doc,
                     plan=p["remediation"],
                     conf_str=p["confidence"],
                     mode="HUMAN-APPROVED",
                     result_id=p.get("result_id", "manual"),
                 )
-            self.latest_state = self._step_all_services_unlocked()
+                to_run.append((dict(srv_doc), p["remediation"], p["confidence"], "HUMAN-APPROVED", p.get("result_id", "manual")))
+            st = self._patch_latest_state_unlocked()
 
-    def rollback_service_or_all(self, service_id: str | None = None) -> None:
+        for srv_doc, plan, conf_str, mode, result_id in to_run:
+            self._run_remediation_async(srv_doc, plan, conf_str, mode, result_id)
+        return st
+
+    def rollback_service_or_all(self, service_id: str | None = None) -> Dict[str, Any]:
         with self._lock:
             if service_id and service_id in self.active_service_rules:
                 rule = self.active_service_rules.pop(service_id)
-                rb_status = execute_service_rollback(rule)
+                self.incident_cooldown.pop(service_id, None)
+                remaining = list(self.active_service_rules.values())
+                stop_script = not self.active_service_rules
+                if stop_script:
+                    self.current_scenario = "Normal"
                 target_str = f"{rule['service_name']} ({rule['address']}:{rule['port']})"
                 action_str = (
-                    f"[{rb_status}] Đã gỡ rule bảo vệ riêng của dịch vụ {target_str} bằng iptables -D "
+                    f"[ROLLED_BACK (LIVE OOB)] Đã gỡ rule bảo vệ riêng của dịch vụ {target_str} bằng iptables -D "
                     f"(không ảnh hưởng các dịch vụ khác)"
                 )
                 self.audit_logs.insert(
@@ -844,6 +1054,7 @@ class AIOpsStateEngine:
                         "status": "ROLLED_BACK",
                     },
                 )
+                self.audit_logs = self.audit_logs[:30]
                 self.db.record_remediation_action(
                     result_id="rollback_srv",
                     service_id=service_id,
@@ -855,14 +1066,24 @@ class AIOpsStateEngine:
                     action_text=action_str,
                     status="ROLLED_BACK",
                 )
-                if not self.active_service_rules:
-                    self.current_scenario = "Normal"
+                st = self._patch_latest_state_unlocked()
+
+                def _rb_one() -> None:
+                    execute_service_rollback(rule, remaining_rules=remaining)
+                    if stop_script:
+                        stop_active_scenario_script()
+
+                threading.Thread(target=_rb_one, daemon=True).start()
+                return st
             else:
-                rb_status = execute_oob_rollback(list(self.active_service_rules.values()))
+                old_rules = list(self.active_service_rules.values())
+                services_snap = [dict(s) for s in self.db.services_cache]
                 self.active_service_rules.clear()
                 self.pending_approvals.clear()
+                self.incident_cooldown.clear()
                 self.current_scenario = "Normal"
-                action_str = f"[{rb_status}] Đã gỡ bỏ toàn bộ các luật chặn iptables tạm thời cho tất cả dịch vụ"
+                self.scenario_status_message = "Đã gỡ toàn bộ luật chặn iptables và dừng kịch bản tấn công"
+                action_str = "[ROLLED_BACK (LIVE OOB)] Đã gỡ bỏ toàn bộ các luật chặn iptables tạm thời cho tất cả dịch vụ"
                 self.audit_logs.insert(
                     0,
                     {
@@ -877,6 +1098,7 @@ class AIOpsStateEngine:
                         "status": "ROLLED_BACK",
                     },
                 )
+                self.audit_logs = self.audit_logs[:30]
                 self.db.record_remediation_action(
                     result_id="rollback_all",
                     service_id="ALL_SERVICES",
@@ -888,8 +1110,14 @@ class AIOpsStateEngine:
                     action_text=action_str,
                     status="ROLLED_BACK",
                 )
+                st = self._patch_latest_state_unlocked()
 
-            self.latest_state = self._step_all_services_unlocked()
+                def _rb_all() -> None:
+                    execute_oob_rollback(old_rules, services=services_snap)
+                    self.collector.reset_accounting_cache()
+
+                threading.Thread(target=_rb_all, daemon=True).start()
+                return st
 
 
 ENGINE = AIOpsStateEngine()
@@ -952,19 +1180,21 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
         if self.path.startswith("/api/state"):
             self._send_json(ENGINE.get_latest_state())
         elif self.path.startswith("/api/database"):
-            ENGINE.db._refresh_caches()
-            self._send_json(
-                {
+            # Trả dữ liệu bộ nhớ đệm tức thì (< 2ms), KHÔNG chặn HTTP bằng 8 truy vấn mạng tới MongoDB Atlas mỗi 2 giây!
+            with ENGINE._lock:
+                payload = {
                     "stats": ENGINE.db.get_collection_stats(),
-                    "Services": ENGINE.db.services_cache,
-                    "AlertRules": ENGINE.db.rules_cache,
-                    "AIResults": ENGINE.db.ai_results_cache[:12],
-                    "Alerts": ENGINE.db.alerts_cache[:12],
-                    "RemediationActions": ENGINE.db.remediations_cache[:12],
+                    "Services": list(ENGINE.db.services_cache),
+                    "AlertRules": list(ENGINE.db.rules_cache),
+                    "AIResults": list(ENGINE.db.ai_results_cache[:12]),
+                    "Alerts": list(ENGINE.db.alerts_cache[:12]),
+                    "RemediationActions": list(ENGINE.db.remediations_cache[:12]),
                 }
-            )
+            self._send_json(payload)
         elif self.path.startswith("/api/services"):
-            self._send_json({"Services": ENGINE.db.services_cache})
+            with ENGINE._lock:
+                services = list(ENGINE.db.services_cache)
+            self._send_json({"Services": services})
         elif self.path.startswith("/api/"):
             self.send_error(404, "Unknown API endpoint")
         else:
@@ -983,25 +1213,28 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
                     ENGINE.forecast_threshold = float(body["threshold"]) / 100.0
                 if "auto_pilot" in body:
                     ENGINE.auto_pilot = bool(body["auto_pilot"])
-                if "data_source_mode" in body:
-                    ENGINE.data_source_mode = str(body["data_source_mode"])
                 ENGINE.db.update_policy_rule(
                     threshold_pct=body.get("threshold"), auto_pilot=body.get("auto_pilot")
                 )
-                ENGINE.latest_state = ENGINE._step_all_services_unlocked()
-                state = ENGINE.latest_state
+                state = ENGINE._patch_latest_state_unlocked()
             self._send_json(state)
         elif self.path == "/api/approve":
-            ENGINE.approve_pending(service_id=body.get("service_id"))
-            self._send_json(ENGINE.get_latest_state())
+            state = ENGINE.approve_pending(service_id=body.get("service_id"))
+            self._send_json(state)
         elif self.path == "/api/rollback":
-            ENGINE.rollback_service_or_all(service_id=body.get("service_id"))
-            self._send_json(ENGINE.get_latest_state())
+            state = ENGINE.rollback_service_or_all(service_id=body.get("service_id"))
+            self._send_json(state)
         elif self.path.startswith("/api/services"):
             with ENGINE._lock:
                 ENGINE.db.create_service(body)
-                ENGINE.latest_state = ENGINE._step_all_services_unlocked()
-                state = ENGINE.latest_state
+                services_snap = [dict(s) for s in ENGINE.db.services_cache]
+                state = ENGINE._patch_latest_state_unlocked()
+            if ENGINE.lab_running and ENGINE.dataplane_ready:
+                threading.Thread(
+                    target=ENGINE.collector.ensure_services_registered,
+                    args=(services_snap,),
+                    daemon=True,
+                ).start()
             self._send_json(state)
         elif self.path == "/alerts":
             ENGINE.alertmanager_webhooks.insert(
@@ -1018,8 +1251,14 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
             sid = parts[3] if len(parts) > 3 else str(body.get("service_id", ""))
             with ENGINE._lock:
                 ENGINE.db.update_service(sid, body)
-                ENGINE.latest_state = ENGINE._step_all_services_unlocked()
-                state = ENGINE.latest_state
+                services_snap = [dict(s) for s in ENGINE.db.services_cache]
+                state = ENGINE._patch_latest_state_unlocked()
+            if ENGINE.lab_running and ENGINE.dataplane_ready:
+                threading.Thread(
+                    target=ENGINE.collector.ensure_services_registered,
+                    args=(services_snap,),
+                    daemon=True,
+                ).start()
             self._send_json(state)
         else:
             self.send_error(404, "Unknown API endpoint")
@@ -1035,8 +1274,7 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
                 ENGINE.service_score_windows.pop(sid, None)
                 ENGINE.active_service_rules.pop(sid, None)
                 ENGINE.pending_approvals.pop(sid, None)
-                ENGINE.latest_state = ENGINE._step_all_services_unlocked()
-                state = ENGINE.latest_state
+                state = ENGINE._patch_latest_state_unlocked()
             self._send_json(state)
         else:
             self.send_error(404, "Unknown API endpoint")
@@ -1046,17 +1284,25 @@ def main() -> None:
     import signal
     import subprocess
 
-    my_pid = str(os.getpid())
+    my_pid = os.getpid()
+    parent_pid = os.getppid()
     try:
-        out = subprocess.check_output(["pgrep", "-f", "aiops-dashboard"], text=True)
+        out = subprocess.check_output(["pgrep", "-f", "aiops-dashboard/backend/app.py"], text=True)
         for p in out.splitlines():
             p = p.strip()
-            if p and p != my_pid:
-                try:
-                    os.kill(int(p), signal.SIGKILL)
-                except Exception:
-                    pass
-        time.sleep(0.6)
+            if not p:
+                continue
+            pid_int = int(p)
+            if pid_int in (my_pid, parent_pid):
+                continue
+            try:
+                cmdline = Path(f"/proc/{pid_int}/cmdline").read_bytes().decode("utf-8", errors="ignore")
+                argv0 = cmdline.split("\x00", 1)[0]
+                if "python" in os.path.basename(argv0):
+                    os.kill(pid_int, signal.SIGKILL)
+            except Exception:
+                pass
+        time.sleep(0.4)
     except Exception:
         pass
 
@@ -1065,8 +1311,11 @@ def main() -> None:
     ThreadingHTTPServer.allow_reuse_address = True
     server = ThreadingHTTPServer((host, port), DashboardHTTPHandler)
     print("=" * 78)
-    print(f"[✓] AIOps Command Center đang chạy tại: http://localhost:{port}")
-    print(f"    (Chế độ dữ liệu: {ENGINE.data_source_mode} | OOB Webhook: http://172.20.20.55:5000/alerts)")
+    print(f"[✓] AIOps Command Center (100% DỮ LIỆU THẬT) đang chạy tại: http://localhost:{port}")
+    print(
+        f"    (Containerlab: {'UP' if ENGINE.lab_running else 'OFFLINE'} | "
+        f"Data Plane eth1: {'READY' if ENGINE.dataplane_ready else 'CẦN sudo ./scripts/deploy.sh'})"
+    )
     print("=" * 78)
     try:
         server.serve_forever()

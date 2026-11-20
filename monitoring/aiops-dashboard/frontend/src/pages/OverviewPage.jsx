@@ -64,12 +64,13 @@ function ServiceCard({ ev, onOpen }) {
 }
 
 export default function OverviewPage({ ctx, onOpenService }) {
-  const { state, simulate, setPolicy } = ctx;
+  const { state, simulate } = ctx;
   const evals = state.service_evaluations || {};
   const list = Object.values(evals);
   const worst = worstLevel(evals);
   const troubled = list.filter((e) => sevRank(e.severity_level) >= 2);
   const events = (state.audit_logs || []).slice(0, 6);
+  const dpReady = state.dataplane_ready !== false;
 
   const bannerText =
     troubled.length > 0
@@ -80,12 +81,19 @@ export default function OverviewPage({ ctx, onOpenService }) {
 
   return (
     <>
+      {!dpReady && (
+        <div className="error-banner">
+          Containerlab chưa sẵn sàng mạng Data Plane (eth1) sau khi khởi động lại máy — chạy{' '}
+          <Code>./scripts/deploy.sh</Code> để bật đầy đủ lưu lượng thật &amp; các kịch bản tấn công.
+        </div>
+      )}
+
       <div className={`status-banner sev-bg-${worst}`}>
         <div>
           <h2>{bannerText}</h2>
           <p>
-            Đang giám sát {list.length} dịch vụ · Cập nhật lúc {state.timestamp} · Nguồn dữ liệu:{' '}
-            {state.data_source_mode === 'LIVE_PROMETHEUS' ? 'Thời gian thực (Prometheus)' : 'Mô phỏng'}
+            Đang giám sát {list.length} dịch vụ · Cập nhật lúc {state.timestamp} · Nguồn dữ liệu: Thời gian thực
+            (Prometheus &amp; Containerlab)
           </p>
         </div>
         <StatusPill level={worst} big />
@@ -103,15 +111,10 @@ export default function OverviewPage({ ctx, onOpenService }) {
 
       <div className="apple-card">
         <div className="card-title-row">
-          <h3>Mô phỏng sự cố (dùng để demo)</h3>
-          <select
-            className="apple-select"
-            value={state.data_source_mode}
-            onChange={(e) => setPolicy({ data_source_mode: e.target.value })}
-          >
-            <option value="LIVE_PROMETHEUS">Nguồn: Thời gian thực</option>
-            <option value="SIMULATION">Nguồn: Mô phỏng</option>
-          </select>
+          <h3>Kích hoạt kịch bản thực tế (Containerlab)</h3>
+          <span className="apple-tag">
+            {dpReady ? 'Dữ liệu thật · Prometheus + Active Probe' : 'Chưa kích hoạt Data Plane'}
+          </span>
         </div>
         <div className="scenario-grid">
           {SCENARIOS.map((s) => (
@@ -124,6 +127,11 @@ export default function OverviewPage({ ctx, onOpenService }) {
             </button>
           ))}
         </div>
+        {state.scenario_status_message && (
+          <p className="muted" style={{ marginTop: 10 }}>
+            {state.scenario_status_message}
+          </p>
+        )}
       </div>
 
       <div className="apple-card">

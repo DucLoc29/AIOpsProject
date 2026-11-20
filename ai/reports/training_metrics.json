@@ -1,17 +1,33 @@
 {
-  "architecture": "Two-Model + Time-Series Trend Formula AIOps Pipeline (Unified 6-SLA Dataset)",
+  "architecture": "Two-Model + Time-Series Trend Formula AIOps Pipeline (100% Real Containerlab 6-SLA Dataset)",
   "unified_dataset": "ai/dataset/aiops_network_dataset.csv",
+  "dataset_rows": 2188,
+  "label_distribution": {
+    "Normal": 1348,
+    "PortScan": 288,
+    "HttpFlood": 252,
+    "SynFlood": 150,
+    "SshBruteforce": 150
+  },
   "model1_eif_detector": {
     "ExtendedIsolationForest": {
-      "accuracy": 0.9821,
-      "precision": 0.961,
-      "recall": 1.0,
-      "f1_score": 0.9801,
-      "roc_auc": 0.9879
+      "accuracy": 0.984,
+      "precision": 0.9653,
+      "recall": 0.994,
+      "f1_score": 0.9795,
+      "roc_auc": 0.9987,
+      "pr_auc": 0.9979
     },
     "StandardIsolationForest": {
-      "f1_score": 0.9548,
-      "roc_auc": 0.9968
+      "accuracy": 0.9521,
+      "f1_score": 0.9369,
+      "roc_auc": 0.9844
+    },
+    "thresholds_4level": {
+      "NORMAL_MAX": 0.5451,
+      "MEDIUM": 0.5451,
+      "HIGH": 0.6061,
+      "CRITICAL": 0.6709
     }
   },
   "forecast_5m_formula": "S_hat(t+5m) = EMA(S_t) + alpha * Slope(S_{t-W..t}) * R_sustained",
@@ -28,21 +44,21 @@
       "macro_precision": 1.0,
       "macro_recall": 1.0,
       "macro_f1": 1.0,
-      "cv5_f1_mean": 0.9968
+      "cv5_f1_mean": 1.0
     },
     "ExtraTrees_RCA": {
       "accuracy": 1.0,
       "macro_precision": 1.0,
       "macro_recall": 1.0,
       "macro_f1": 1.0,
-      "cv5_f1_mean": 0.9984
+      "cv5_f1_mean": 1.0
     },
     "GradientBoosting_RCA": {
-      "accuracy": 0.9881,
-      "macro_precision": 0.9957,
-      "macro_recall": 0.9789,
-      "macro_f1": 0.9867,
-      "cv5_f1_mean": 0.9951
+      "accuracy": 1.0,
+      "macro_precision": 1.0,
+      "macro_recall": 1.0,
+      "macro_f1": 1.0,
+      "cv5_f1_mean": 0.9954
     }
   }
 }

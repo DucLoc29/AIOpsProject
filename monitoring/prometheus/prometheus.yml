@@ -3,9 +3,9 @@
 #  Mạng OOB: 172.20.20.0/24
 # =============================================================================
 global:
-  scrape_interval: 5s
-  evaluation_interval: 5s
-  scrape_timeout: 4s
+  scrape_interval: 2s
+  evaluation_interval: 2s
+  scrape_timeout: 1500ms
 
 alerting:
   alertmanagers:

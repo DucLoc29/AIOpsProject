@@ -67,7 +67,7 @@ topology:
       mgmt-ipv4: 172.20.20.13
       cmd: sleep infinity
       exec:
-        - apk add --no-cache -q iptables tcpdump prometheus-node-exporter
+        - apk add --no-cache -q iptables tcpdump prometheus-node-exporter python3
         - sysctl -w net.ipv4.ip_forward=1
         - ip addr add 10.0.1.2/30 dev eth1
         - ip addr add 192.168.10.1/24 dev eth2
@@ -98,20 +98,20 @@ topology:
         - app/html:/usr/share/nginx/html
       exec:
         - sh -c "echo 'nameserver 8.8.8.8' > /etc/resolv.conf"
-        - apk add --no-cache -q prometheus-node-exporter openssh
+        - apk add --no-cache -q prometheus-node-exporter openssh iptables
         - sh -c "nohup node_exporter >/dev/null 2>&1 &"
         - ssh-keygen -A
         - adduser -D -s /bin/sh opsadmin
         - sh -c "echo 'opsadmin:Corp@2026' | chpasswd"
         - sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
         - sed -i 's/^#\?LogLevel.*/LogLevel VERBOSE/' /etc/ssh/sshd_config
+        - sh -c "echo 'PerSourcePenaltyExemptList 192.168.10.1' >> /etc/ssh/sshd_config"
         - /usr/sbin/sshd
         - ip addr add 192.168.10.10/24 dev eth1
         - ip link set dev eth1 up
         - ip route replace 172.16.0.0/16 via 192.168.10.1
         - ip route replace 10.0.0.0/16 via 192.168.10.1
         - ip route replace 203.0.113.0/24 via 192.168.10.1
-        - sh -c "nohup node_exporter >/dev/null 2>&1 &"
 
     # -------------------------------------------------------------------------
     # 5b. App Server - Flask API (5000), tầng ứng dụng
@@ -131,7 +131,7 @@ topology:
         - ip route replace 172.16.0.0/16 via 192.168.10.1
         - ip route replace 10.0.0.0/16 via 192.168.10.1
         - ip route replace 203.0.113.0/24 via 192.168.10.1
-        - apk add --no-cache -q prometheus-node-exporter
+        - apk add --no-cache -q prometheus-node-exporter iptables
         - sh -c "nohup node_exporter >/dev/null 2>&1 &"
         - pip install -q --no-cache-dir flask psycopg2-binary prometheus-client
         - sh -c "cd /opt/api && nohup python app.py >/var/log/api.log 2>&1 &"
@@ -157,7 +157,7 @@ topology:
         - ip route replace 172.16.0.0/16 via 192.168.10.1
         - ip route replace 10.0.0.0/16 via 192.168.10.1
         - ip route replace 203.0.113.0/24 via 192.168.10.1
-        - apk add --no-cache -q prometheus-node-exporter
+        - apk add --no-cache -q prometheus-node-exporter iptables
         - sh -c "nohup node_exporter >/dev/null 2>&1 &"
 
     # -------------------------------------------------------------------------

@@ -16,7 +16,7 @@ export function StatusPill({ level, big = false }) {
   return <span className={`sev-pill sev-${lv} ${big ? 'big' : ''}`}>{sevLabel(lv)}</span>;
 }
 
-/** Kịch bản mô phỏng để demo (đã bỏ WAN). */
+/** Kịch bản thực tế chạy trực tiếp trên Containerlab. */
 export const SCENARIOS = [
   { id: 'Normal', label: 'Bình thường' },
   { id: 'TransientSpike', label: 'Gai nhiễu thoáng qua' },
@@ -31,6 +31,8 @@ export const FAULT_LABELS = {
   HttpFlood: 'Tấn công HTTP Flood',
   SshBruteforce: 'Dò mật khẩu SSH',
   PortScan: 'Quét cổng (Port Scan)',
+  TransientSpike: 'Gai nhiễu thoáng qua',
+  Unknown_Anomaly: 'Bất thường chưa xác định',
   Normal: 'Không có sự cố',
   'Normal (Standby)': 'Không có sự cố',
 };

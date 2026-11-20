@@ -13,9 +13,10 @@ Quản lý 5 Bảng (Collections) chuẩn trong database `AIOpsProject`:
 
 import os
 import re
+import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 ENV_FILE = PROJECT_ROOT / ".env"
@@ -179,6 +180,16 @@ class AIOpsDatabase:
 
         self._connect_and_seed()
 
+    def _run_async(self, fn: Callable[[], None]) -> None:
+        """Ghi MongoDB Atlas bất đồng bộ trên luồng nền để không bao giờ làm lag thao tác Web UI."""
+        def _worker() -> None:
+            try:
+                fn()
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _connect_and_seed(self) -> None:
         if not self.mongo_uri:
             self.status_message = "Thiếu MONGO_URI trong .env (Đang chạy Local Memory)"
@@ -264,12 +275,12 @@ class AIOpsDatabase:
         self.counts["Services"] = len(self.services_cache)
 
         if self.connected and self.db is not None:
-            try:
-                self.db["Services"].update_one(
-                    {"service_id": raw_id}, {"$set": dict(new_doc)}, upsert=True
+            doc_copy = dict(new_doc)
+            self._run_async(
+                lambda: self.db["Services"].update_one(
+                    {"service_id": raw_id}, {"$set": doc_copy}, upsert=True
                 )
-            except Exception:
-                pass
+            )
 
         return new_doc
 
@@ -301,10 +312,10 @@ class AIOpsDatabase:
         target.update(updates)
 
         if self.connected and self.db is not None:
-            try:
-                self.db["Services"].update_one({"service_id": service_id}, {"$set": updates})
-            except Exception:
-                pass
+            upd_copy = dict(updates)
+            self._run_async(
+                lambda: self.db["Services"].update_one({"service_id": service_id}, {"$set": upd_copy})
+            )
 
         return target
 
@@ -317,10 +328,7 @@ class AIOpsDatabase:
         self.counts["Services"] = len(self.services_cache)
 
         if self.connected and self.db is not None:
-            try:
-                self.db["Services"].delete_one({"service_id": service_id})
-            except Exception:
-                pass
+            self._run_async(lambda: self.db["Services"].delete_one({"service_id": service_id}))
         return len(self.services_cache) < before
 
     def update_services_live_state(self, evaluations: Dict[str, Dict[str, Any]]) -> None:
@@ -419,12 +427,12 @@ class AIOpsDatabase:
             if auto_pilot is not None:
                 update_fields["auto_remediate"] = bool(auto_pilot)
             if update_fields:
-                try:
-                    self.db["AlertRules"].update_one(
-                        {"rule_id": "rule_ai_policy_gate"}, {"$set": update_fields}, upsert=True
+                uf_copy = dict(update_fields)
+                self._run_async(
+                    lambda: self.db["AlertRules"].update_one(
+                        {"rule_id": "rule_ai_policy_gate"}, {"$set": uf_copy}, upsert=True
                     )
-                except Exception:
-                    pass
+                )
 
     def record_ai_inference_and_incident(
         self,
@@ -465,10 +473,8 @@ class AIOpsDatabase:
         self.counts["AIResults"] = self.counts.get("AIResults", 0) + 1
 
         if self.connected and self.db is not None:
-            try:
-                self.db["AIResults"].insert_one(dict(ai_doc))
-            except Exception:
-                pass
+            ai_copy = dict(ai_doc)
+            self._run_async(lambda: self.db["AIResults"].insert_one(ai_copy))
 
         if trigger_m3:
             alert_doc = {
@@ -489,10 +495,8 @@ class AIOpsDatabase:
             self.alerts_cache = self.alerts_cache[:20]
             self.counts["Alerts"] = self.counts.get("Alerts", 0) + 1
             if self.connected and self.db is not None:
-                try:
-                    self.db["Alerts"].insert_one(dict(alert_doc))
-                except Exception:
-                    pass
+                alt_copy = dict(alert_doc)
+                self._run_async(lambda: self.db["Alerts"].insert_one(alt_copy))
 
         return result_id
 
@@ -528,10 +532,8 @@ class AIOpsDatabase:
         self.counts["RemediationActions"] = self.counts.get("RemediationActions", 0) + 1
 
         if self.connected and self.db is not None:
-            try:
-                self.db["RemediationActions"].insert_one(dict(rem_doc))
-            except Exception:
-                pass
+            rem_copy = dict(rem_doc)
+            self._run_async(lambda: self.db["RemediationActions"].insert_one(rem_copy))
 
     def get_collection_stats(self) -> Dict[str, Any]:
         return {
