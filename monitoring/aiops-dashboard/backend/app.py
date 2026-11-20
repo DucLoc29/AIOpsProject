@@ -7,8 +7,7 @@ Kiến trúc chuẩn hóa:
   1. Thu thập 100% Thời gian thực qua `RealContainerlabTelemetryCollector` (Single Source of Truth):
      - Đo trực tiếp 6 Thông số SLA (`latency`, `jitter`, `packet_loss`, `throughput`, `response_time`, `uptime`)
        từ Data-Plane Active Probe (`firewall` -> `192.168.10.x:port`) + Kernel Per-Port Accounting + Prometheus (2s).
-     - TUYỆT ĐỐI KHÔNG dùng công thức giả lập theo kịch bản hay `if/elif` phân loại tấn công trước AI!
-     - Bấm nút kịch bản trên Web sẽ thực thi trực tiếp file bash trong `scripts/scenarios/`.
+     - Hoàn toàn 100% thời gian thực — không có chế độ giả lập hay nút kích hoạt kịch bản trên giao diện.
   2. Nạp trực tiếp 2 Mô hình AI huấn luyện từ dataset 100% thực nghiệm:
      - Bước 1 — Model 1 (`ai/models/model1_eif_detector.pkl`, EIF 18 đặc trưng trượt + `thresholds_4level`):
        Đánh giá sức khỏe hiện tại theo 4 mức độ (`NORMAL`, `MEDIUM`, `HIGH`, `CRITICAL`).
@@ -63,8 +62,7 @@ from remediation import (  # noqa: E402
     execute_service_rollback,
     is_containerlab_running,
     is_lab_dataplane_ready,
-    launch_live_scenario_script,
-    stop_active_scenario_script,
+    stop_active_attack_processes,
 )
 from telemetry import RealContainerlabTelemetryCollector  # noqa: E402
 
@@ -121,7 +119,6 @@ class AIOpsStateEngine:
         policy_cfg = self.db.get_policy_config()
 
         self.prom_url = os.environ.get("PROMETHEUS_URL", "http://127.0.0.1:9090")
-        self.data_source_mode = "LIVE_PROMETHEUS"
         self.collector = RealContainerlabTelemetryCollector(prom_url=self.prom_url)
 
         self.lab_running = is_containerlab_running()
@@ -130,12 +127,6 @@ class AIOpsStateEngine:
             ensure_background_normal_traffic()
             self.collector.ensure_services_registered(list(self.db.services_cache))
 
-        self.current_scenario = "Normal"
-        self.scenario_status_message = (
-            "Đang thu thập 100% dữ liệu vật lý thật (Data-Plane Probe + Kernel Accounting + Prometheus 2s)"
-            if self.dataplane_ready
-            else "Containerlab chưa kích hoạt mạng Data Plane (eth1) — chạy sudo ./scripts/deploy.sh để thu thập đầy đủ lưu lượng thật"
-        )
         self.tick_counter = 0
         self.forecast_threshold = float(policy_cfg.get("threshold_pct", 60.0)) / 100.0
         self.auto_pilot = bool(policy_cfg.get("auto_pilot", True))
@@ -519,7 +510,7 @@ class AIOpsStateEngine:
                     self.spike_log_cooldown[sid] = now_ts
                     result_id = self.db.record_ai_inference_and_incident(
                         service_id=sid,
-                        scenario=self.current_scenario,
+                        scenario="TransientSpike",
                         m1_score=ev["model1"]["anomaly_score"],
                         m1_severity=ev["severity_level"],
                         m2_prob_pct=ev["model2"]["prob_5m_pct"],
@@ -533,7 +524,7 @@ class AIOpsStateEngine:
                     entry = {
                         "time": datetime.now().strftime("%H:%M:%S"),
                         "service_id": sid,
-                        "scenario": self.current_scenario,
+                        "scenario": "TransientSpike",
                         "trigger": "SLIDING_WINDOW_FILTER",
                         "fault_class": "TransientSpike",
                         "confidence": f"Hiện tại: {ev['severity_label_vi']} | Dự báo 5m: {ev['model2']['forecast_label_vi']} ({ev['model2']['prob_5m_pct']}%)",
@@ -546,7 +537,7 @@ class AIOpsStateEngine:
                     self.db.record_remediation_action(
                         result_id=result_id,
                         service_id=sid,
-                        scenario=self.current_scenario,
+                        scenario="TransientSpike",
                         trigger_mode="SLIDING_WINDOW_FILTER",
                         fault_class="TransientSpike",
                         confidence=entry["confidence"],
@@ -586,7 +577,7 @@ class AIOpsStateEngine:
 
             result_id = self.db.record_ai_inference_and_incident(
                 service_id=sid,
-                scenario=self.current_scenario,
+                scenario=fault_cls,
                 m1_score=ev["model1"]["anomaly_score"],
                 m1_severity=ev["severity_level"],
                 m2_prob_pct=ev["model2"]["prob_5m_pct"],
@@ -602,7 +593,7 @@ class AIOpsStateEngine:
                 entry = {
                     "time": datetime.now().strftime("%H:%M:%S"),
                     "service_id": sid,
-                    "scenario": self.current_scenario,
+                    "scenario": fault_cls,
                     "trigger": "ALERT_ONLY",
                     "fault_class": fault_cls,
                     "confidence": conf_str,
@@ -615,7 +606,7 @@ class AIOpsStateEngine:
                 self.db.record_remediation_action(
                     result_id=result_id,
                     service_id=sid,
-                    scenario=self.current_scenario,
+                    scenario=fault_cls,
                     trigger_mode="ALERT_ONLY",
                     fault_class=fault_cls,
                     confidence=conf_str,
@@ -647,7 +638,7 @@ class AIOpsStateEngine:
                 entry = {
                     "time": datetime.now().strftime("%H:%M:%S"),
                     "service_id": sid,
-                    "scenario": self.current_scenario,
+                    "scenario": fault_cls,
                     "trigger": "MANUAL_WAIT",
                     "fault_class": fault_cls,
                     "confidence": conf_str,
@@ -660,7 +651,7 @@ class AIOpsStateEngine:
                 self.db.record_remediation_action(
                     result_id=result_id,
                     service_id=sid,
-                    scenario=self.current_scenario,
+                    scenario=fault_cls,
                     trigger_mode="MANUAL_WAIT",
                     fault_class=fault_cls,
                     confidence=conf_str,
@@ -763,11 +754,8 @@ class AIOpsStateEngine:
 
         state = {
             "timestamp": now_t,
-            "data_source_mode": "LIVE_PROMETHEUS",
             "lab_running": self.lab_running,
             "dataplane_ready": self.dataplane_ready,
-            "scenario_active": self.current_scenario,
-            "scenario_status_message": self.scenario_status_message,
             "performance_history": list(self.performance_history),
             "service_evaluations": service_evaluations,
             "model1": primary_ev["model1"] if primary_ev else {},
@@ -803,8 +791,6 @@ class AIOpsStateEngine:
         if not self.latest_state:
             return self.latest_state
         st = dict(self.latest_state)
-        st["scenario_active"] = self.current_scenario
-        st["scenario_status_message"] = self.scenario_status_message
         st["audit_logs"] = self.audit_logs[:15]
         st["db_stats"] = self.db.get_collection_stats()
         if isinstance(st.get("policy_gate"), dict):
@@ -863,49 +849,6 @@ class AIOpsStateEngine:
     def get_latest_state(self) -> Dict[str, Any]:
         with self._lock:
             return self.latest_state
-
-    def apply_scenario(self, scenario_name: str) -> Dict[str, Any]:
-        """
-        Chỉ thực thi script tấn công/tải THẬT trong `scripts/scenarios/` trên Containerlab.
-        Chạy tiến trình script ở luồng nền để nút bấm trên Web phản hồi tức thì (< 5ms).
-        """
-        valid_scenarios = {"Normal", "TransientSpike", "SynFlood", "HttpFlood", "SshBruteforce", "PortScan"}
-        if scenario_name not in valid_scenarios:
-            scenario_name = "Normal"
-
-        with self._lock:
-            self.current_scenario = scenario_name
-            if scenario_name != "Normal":
-                self.incident_cooldown.clear()
-                self.spike_log_cooldown.clear()
-            self.scenario_status_message = (
-                "Đang dừng kịch bản sự cố & duy trì lưu lượng bình thường..."
-                if scenario_name == "Normal"
-                else f"Đang khởi chạy kịch bản thật: {scenario_name}..."
-            )
-            state_now = self._patch_latest_state_unlocked()
-
-        def _launch_bg() -> None:
-            ok, msg = launch_live_scenario_script(scenario_name, duration=45)
-            with self._lock:
-                self.scenario_status_message = msg
-                entry = {
-                    "time": datetime.now().strftime("%H:%M:%S"),
-                    "service_id": "ALL_SERVICES",
-                    "scenario": scenario_name,
-                    "trigger": "LIVE_SCENARIO",
-                    "fault_class": scenario_name if scenario_name != "Normal" else "Normal",
-                    "confidence": "LIVE",
-                    "target": "Containerlab Data Plane",
-                    "action": msg,
-                    "status": "STARTED" if ok else "LAB_NOT_READY",
-                }
-                self.audit_logs.insert(0, entry)
-                self.audit_logs = self.audit_logs[:30]
-                self._patch_latest_state_unlocked()
-
-        threading.Thread(target=_launch_bg, daemon=True).start()
-        return state_now
 
     def _register_service_rule_unlocked(
         self,
@@ -974,7 +917,7 @@ class AIOpsStateEngine:
                     {
                         "time": datetime.now().strftime("%H:%M:%S"),
                         "service_id": sid,
-                        "scenario": self.current_scenario,
+                        "scenario": plan["fault_class"],
                         "trigger": mode,
                         "fault_class": plan["fault_class"],
                         "confidence": conf_str,
@@ -987,7 +930,7 @@ class AIOpsStateEngine:
                 self.db.record_remediation_action(
                     result_id=result_id,
                     service_id=sid,
-                    scenario=self.current_scenario,
+                    scenario=plan["fault_class"],
                     trigger_mode=mode,
                     fault_class=plan["fault_class"],
                     confidence=conf_str,
@@ -1032,9 +975,7 @@ class AIOpsStateEngine:
                 rule = self.active_service_rules.pop(service_id)
                 self.incident_cooldown.pop(service_id, None)
                 remaining = list(self.active_service_rules.values())
-                stop_script = not self.active_service_rules
-                if stop_script:
-                    self.current_scenario = "Normal"
+                stop_attacks = not self.active_service_rules
                 target_str = f"{rule['service_name']} ({rule['address']}:{rule['port']})"
                 action_str = (
                     f"[ROLLED_BACK (LIVE OOB)] Đã gỡ rule bảo vệ riêng của dịch vụ {target_str} bằng iptables -D "
@@ -1070,8 +1011,8 @@ class AIOpsStateEngine:
 
                 def _rb_one() -> None:
                     execute_service_rollback(rule, remaining_rules=remaining)
-                    if stop_script:
-                        stop_active_scenario_script()
+                    if stop_attacks:
+                        stop_active_attack_processes()
 
                 threading.Thread(target=_rb_one, daemon=True).start()
                 return st
@@ -1081,8 +1022,6 @@ class AIOpsStateEngine:
                 self.active_service_rules.clear()
                 self.pending_approvals.clear()
                 self.incident_cooldown.clear()
-                self.current_scenario = "Normal"
-                self.scenario_status_message = "Đã gỡ toàn bộ luật chặn iptables và dừng kịch bản tấn công"
                 action_str = "[ROLLED_BACK (LIVE OOB)] Đã gỡ bỏ toàn bộ các luật chặn iptables tạm thời cho tất cả dịch vụ"
                 self.audit_logs.insert(
                     0,
@@ -1203,11 +1142,7 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         body = self._read_json_body()
 
-        if self.path == "/api/simulate":
-            scenario = str(body.get("scenario", "Normal"))
-            state = ENGINE.apply_scenario(scenario)
-            self._send_json(state)
-        elif self.path == "/api/policy":
+        if self.path == "/api/policy":
             with ENGINE._lock:
                 if "threshold" in body:
                     ENGINE.forecast_threshold = float(body["threshold"]) / 100.0

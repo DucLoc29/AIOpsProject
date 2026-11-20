@@ -16,16 +16,6 @@ export function StatusPill({ level, big = false }) {
   return <span className={`sev-pill sev-${lv} ${big ? 'big' : ''}`}>{sevLabel(lv)}</span>;
 }
 
-/** Kịch bản thực tế chạy trực tiếp trên Containerlab. */
-export const SCENARIOS = [
-  { id: 'Normal', label: 'Bình thường' },
-  { id: 'TransientSpike', label: 'Gai nhiễu thoáng qua' },
-  { id: 'SynFlood', label: 'SYN Flood' },
-  { id: 'HttpFlood', label: 'HTTP Flood' },
-  { id: 'SshBruteforce', label: 'SSH Brute-force' },
-  { id: 'PortScan', label: 'Port Scan nội bộ' },
-];
-
 export const FAULT_LABELS = {
   SynFlood: 'Tấn công SYN Flood',
   HttpFlood: 'Tấn công HTTP Flood',

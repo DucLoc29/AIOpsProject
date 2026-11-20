@@ -14,7 +14,6 @@ const sendJson = (method, path, body) =>
 export const api = {
   getState: () => request('/api/state'),
   getDatabase: () => request('/api/database'),
-  simulate: (scenario) => sendJson('POST', '/api/simulate', { scenario }),
   setPolicy: (payload) => sendJson('POST', '/api/policy', payload),
   approve: (service_id) => sendJson('POST', '/api/approve', service_id ? { service_id } : {}),
   rollback: (service_id) => sendJson('POST', '/api/rollback', service_id ? { service_id } : {}),

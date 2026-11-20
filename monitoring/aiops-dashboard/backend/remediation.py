@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """
-Module Điều phối Kịch bản & Tự động Ứng phó Hướng Dịch vụ qua Mạng OOB (Service-Centric Auto-Remediation).
+Module Điều phối Lưu lượng Nền & Tự động Ứng phó Hướng Dịch vụ qua Mạng OOB (Service-Centric Auto-Remediation).
 
 Đặc điểm cốt lõi (100% Thực thi thật trên Containerlab):
-  1. Mọi kịch bản (bao gồm cả `05_transient_spike.sh`) đều chạy trực tiếp lệnh tấn công/tải thật
-     trên Containerlab — không tạo số liệu giả lập.
+  1. Truy vết IP nguồn động và tự động chọn điểm chặn (Firewall FORWARD cho North-South, Host INPUT cho East-West LAN).
   2. Mọi câu lệnh ứng phó `iptables` đều idempotent (`iptables -C` trước khi `iptables -I`) và
      hỗ trợ Rollback độc lập từng dịch vụ bằng `iptables -D` (có kiểm tra rule dùng chung).
   3. Bảo toàn chuỗi đếm gói kernel (`AIOPS_ACCT_IN`, `AIOPS_ACCT_OUT`) khi gỡ rule hoặc rollback toàn bộ.
 """
 
-import os
-import signal
 import subprocess
 import urllib.request
 from pathlib import Path
@@ -19,15 +16,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 SCENARIOS_DIR = PROJECT_ROOT / "scripts" / "scenarios"
-
-SCENARIO_SCRIPT_MAP = {
-    "Normal": "00_normal_traffic.sh",
-    "SynFlood": "01_internet_syn_flood.sh",
-    "PortScan": "02_insider_port_scan.sh",
-    "SshBruteforce": "03_ssh_bruteforce.sh",
-    "HttpFlood": "04_server_http_flood.sh",
-    "TransientSpike": "05_transient_spike.sh",
-}
 
 HOST_IP_MAP: Dict[str, Dict[str, str]] = {
     "192.168.10.10": {
@@ -237,7 +225,6 @@ def build_service_remediation_plan(
 
 
 _BG_TRAFFIC_PROC: Optional[subprocess.Popen] = None
-_ACTIVE_ATTACK_PROC: Optional[subprocess.Popen] = None
 
 
 def _run_docker_cmd(args: List[str], timeout: float = 3.0) -> subprocess.CompletedProcess:
@@ -319,19 +306,8 @@ def ensure_background_normal_traffic() -> None:
         pass
 
 
-def stop_active_scenario_script() -> None:
-    """Dừng mọi kịch bản tấn công thực tế đang chạy trong Containerlab."""
-    global _ACTIVE_ATTACK_PROC
-    if _ACTIVE_ATTACK_PROC is not None and _ACTIVE_ATTACK_PROC.poll() is None:
-        try:
-            os.killpg(os.getpgid(_ACTIVE_ATTACK_PROC.pid), signal.SIGTERM)
-        except Exception:
-            try:
-                _ACTIVE_ATTACK_PROC.terminate()
-            except Exception:
-                pass
-    _ACTIVE_ATTACK_PROC = None
-
+def stop_active_attack_processes() -> None:
+    """Dọn mọi tiến trình tấn công còn chạy trên các node Containerlab khi quản trị viên bấm Rollback."""
     if not is_containerlab_running():
         return
 
@@ -432,7 +408,7 @@ def execute_oob_rollback(
     Khôi phục toàn bộ các rule chặn `DROP` & dừng mọi kịch bản tấn công,
     đồng thời bảo toàn chuỗi đếm gói kernel `AIOPS_ACCT_IN` / `AIOPS_ACCT_OUT`.
     """
-    stop_active_scenario_script()
+    stop_active_attack_processes()
     if not is_containerlab_running():
         return "ROLLED_BACK (LAB_OFFLINE)"
 
@@ -468,37 +444,3 @@ def execute_oob_rollback(
             pass
 
     return "ROLLED_BACK (LIVE OOB)"
-
-
-def launch_live_scenario_script(scenario_name: str, duration: int = 45) -> Tuple[bool, str]:
-    """Khởi chạy kịch bản thực tế trên Containerlab (từ `scripts/scenarios/`)."""
-    global _ACTIVE_ATTACK_PROC
-    if scenario_name == "Normal":
-        stop_active_scenario_script()
-        ensure_background_normal_traffic()
-        return True, "Đã dừng kịch bản sự cố, duy trì lưu lượng bình thường (00_normal_traffic.sh)"
-
-    script_file = SCENARIO_SCRIPT_MAP.get(scenario_name)
-    if not script_file:
-        return False, f"Không có script cho kịch bản {scenario_name}"
-    script_path = SCENARIOS_DIR / script_file
-    if not script_path.exists():
-        return False, f"Không tìm thấy {script_path}"
-    if not is_containerlab_running():
-        return False, "Containerlab đang tắt"
-    if not is_lab_dataplane_ready():
-        return False, "Mạng Data Plane (eth1) chưa sẵn sàng — cần chạy ./scripts/deploy.sh"
-
-    try:
-        stop_active_scenario_script()
-        ensure_background_normal_traffic()
-        run_dur = 2 if scenario_name == "TransientSpike" else duration
-        _ACTIVE_ATTACK_PROC = subprocess.Popen(
-            ["bash", str(script_path), str(run_dur)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        return True, f"Đã chạy kịch bản thật: {script_file} ({run_dur}s)"
-    except Exception as exc:
-        return False, f"Lỗi chạy kịch bản {script_file}: {exc}"

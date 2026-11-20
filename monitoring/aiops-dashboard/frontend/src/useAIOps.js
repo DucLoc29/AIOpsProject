@@ -40,7 +40,6 @@ export function useAIOps(intervalMs = 2000) {
     state,
     db,
     error,
-    simulate: (scenario) => act(() => api.simulate(scenario)),
     setPolicy: (payload) => act(() => api.setPolicy(payload)),
     approve: (service_id) => act(() => api.approve(service_id)),
     rollback: (service_id) => act(() => api.rollback(service_id)),

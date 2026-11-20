@@ -326,13 +326,6 @@ body {
   color: var(--apple-blue);
 }
 
-/* SCENARIO SEGMENTED BUTTONS */
-.scenario-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
 .apple-btn {
   font-family: var(--font-sans);
   font-size: 0.8rem;
@@ -746,20 +739,6 @@ body {
 }
 
 /* ===== Performance History 2x2 Charts (Apple White Card Style) ===== */
-.compact-scenario-bar {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  flex-wrap: wrap;
-  padding: 14px 18px;
-}
-
-.compact-label {
-  font-size: 0.8rem;
-  font-weight: 600;
-  color: var(--apple-text-secondary);
-}
-
 .perf-section {
   display: flex;
   flex-direction: column;

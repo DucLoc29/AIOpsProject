@@ -1,6 +1,6 @@
 import React from 'react';
 import { Code } from '../components/DataTable.jsx';
-import { SCENARIOS, StatusPill, faultLabel, sevLabel, sevRank, worstLevel } from '../lib.jsx';
+import { StatusPill, faultLabel, sevLabel, sevRank, worstLevel } from '../lib.jsx';
 
 function Metric({ label, value, unit }) {
   return (
@@ -64,7 +64,7 @@ function ServiceCard({ ev, onOpen }) {
 }
 
 export default function OverviewPage({ ctx, onOpenService }) {
-  const { state, simulate } = ctx;
+  const { state } = ctx;
   const evals = state.service_evaluations || {};
   const list = Object.values(evals);
   const worst = worstLevel(evals);
@@ -107,31 +107,6 @@ export default function OverviewPage({ ctx, onOpenService }) {
         {list.map((ev) => (
           <ServiceCard key={ev.service_id} ev={ev} onOpen={onOpenService} />
         ))}
-      </div>
-
-      <div className="apple-card">
-        <div className="card-title-row">
-          <h3>Kích hoạt kịch bản thực tế (Containerlab)</h3>
-          <span className="apple-tag">
-            {dpReady ? 'Dữ liệu thật · Prometheus + Active Probe' : 'Chưa kích hoạt Data Plane'}
-          </span>
-        </div>
-        <div className="scenario-grid">
-          {SCENARIOS.map((s) => (
-            <button
-              key={s.id}
-              className={`apple-btn ${state.scenario_active === s.id ? 'active' : ''}`}
-              onClick={() => simulate(s.id)}
-            >
-              {s.label}
-            </button>
-          ))}
-        </div>
-        {state.scenario_status_message && (
-          <p className="muted" style={{ marginTop: 10 }}>
-            {state.scenario_status_message}
-          </p>
-        )}
       </div>
 
       <div className="apple-card">
