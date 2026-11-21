@@ -97,7 +97,7 @@ for m in model1_eif_detector.pkl model2_rca_classifier.pkl; do
   [ -f "ai/models/$m" ] && ok "Đã nạp file mô hình ai/models/$m" || bad "Thiếu file ai/models/$m"
 done
 curl -sf -m3 http://127.0.0.1:5000/api/state | grep -q '"model1"' \
-  && ok "AIOps Command Center (:5000) & Pipeline 3 Model hoạt động tốt" \
+  && ok "AIOps Command Center (:5000) & Pipeline 2 Model + Công thức Dự báo hoạt động tốt" \
   || bad "AIOps Command Center (:5000) chưa phản hồi"
 
 echo

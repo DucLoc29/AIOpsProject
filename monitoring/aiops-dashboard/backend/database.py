@@ -6,7 +6,7 @@ Hỗ trợ đầy đủ CRUD (Thêm / Sửa / Xóa) cho bảng `Services` đồn
 Quản lý 5 Bảng (Collections) chuẩn trong database `AIOpsProject`:
   1. `Services`           : Danh mục các Dịch vụ ứng dụng doanh nghiệp (Hỗ trợ CRUD Thêm / Sửa / Xóa động)
   2. `AlertRules`         : Cấu hình luật cảnh báo & ngưỡng điều phối hệ thống AI (Policy Gate)
-  3. `AIResults`          : Kết quả suy luận AI (Model 1 4-mức -> Dự báo 5m 4-mức -> Model 3 RCA) theo từng Service
+  3. `AIResults`          : Kết quả suy luận AI (Model 1 4-mức -> Dự báo 5m 4-mức -> Model 2 RCA) theo từng Service
   4. `Alerts`             : Cảnh báo sự cố chính thức của từng Service
   5. `RemediationActions` : Nhật ký câu lệnh tự động ứng phó khép kín theo IP:Port & Rollback từng dịch vụ
 """
@@ -98,7 +98,7 @@ DEFAULT_ALERT_RULES: List[Dict[str, Any]] = [
         "severity": "critical",
         "auto_remediate": True,
         "is_active": True,
-        "description": "Ngưỡng dự báo suy giảm dịch vụ 5 phút tới (Mức HIGH/CRITICAL >= 60%) để kích hoạt Model 3 (RCA)",
+        "description": "Ngưỡng dự báo suy giảm dịch vụ 5 phút tới (Mức HIGH/CRITICAL >= 60%) để kích hoạt Model 2 (RCA)",
     },
     {
         "rule_id": "rule_web_syn_flood",

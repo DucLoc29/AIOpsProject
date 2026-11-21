@@ -144,7 +144,7 @@ Route tĩnh: `172.16.1.0/24`, `10.0.0.0/16` và `203.0.113.0/24` đều đi qua 
 ### 3.6 Cụm Giám sát & AIOps (Mạng OOB)
 | Node | Image | Mgmt IP (eth0) | Cổng Host | Vai trò |
 |---|---|---|---|---|
-| prometheus | prom/prometheus:latest | 172.20.20.51 | 9090 | Thu thập time-series metrics mỗi 5s, đánh giá alert rules |
+| prometheus | prom/prometheus:latest | 172.20.20.51 | 9090 | Thu thập time-series metrics mỗi 2s, đánh giá alert rules |
 | alertmanager | prom/alertmanager:latest | 172.20.20.52 | 9093 | Gom nhóm cảnh báo, định tuyến webhook tự động phản ứng |
 | grafana | grafana/grafana:latest | 172.20.20.53 | 3000 | Dashboard trực quan hóa băng thông WAN, CPU, rớt gói, tấn công |
 | nginx-exporter | nginx/nginx-prometheus-exporter | 172.20.20.54 | 9113 | Đọc `/stub_status` của service-server, xuất metrics Nginx |
