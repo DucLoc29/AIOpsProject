@@ -133,6 +133,12 @@ ESCALATION_L3_SECONDS=60
   5. **Thông báo Hồi phục (`Auto-Resolved`):** Khi dịch vụ từng cảnh báo quay về `NORMAL` ổn định (≥ 2 chu kỳ liên tiếp), gửi 1 tin nhắn gọn **🟢 [ĐÃ HỒI PHỤC]** để đóng vòng đời sự cố.
   - Có thể hiển thị thêm nhãn tầng leo thang (`L1` / `L2` / `L3`) ngay trên thẻ chờ phê duyệt ở trang [`ResponsePage.jsx`](monitoring/aiops-dashboard/frontend/src/pages/ResponsePage.jsx).
 
+### 3.4. Nối thông Alertmanager Webhook (Tuyến cảnh báo hạ tầng cứng → Web & Telegram)
+- **Vai trò:** Prometheus (`172.20.20.51:9090`) đánh giá 5 luật hạ tầng cứng trong [`monitoring/prometheus/rules/network_alerts.yml`](monitoring/prometheus/rules/network_alerts.yml) (`HostDown`, `WANLinkDown`, `HighPacketRate`, `HighPacketDropRate`, `HighCpuUsage`) và gửi sang Alertmanager (`172.20.20.52:9093`) để gom nhóm, chống lặp và bắn Webhook về Backend `POST /alerts` — bổ trợ cho tuyến AI ở tầng dịch vụ.
+- **2 điểm cần sửa để nối thông thật:**
+  1. Trong [`monitoring/alertmanager/alertmanager.yml`](monitoring/alertmanager/alertmanager.yml) dòng 25, đổi `url: 'http://172.20.20.55:5000/alerts'` thành **`url: 'http://172.20.20.1:5000/alerts'`** (IP gateway mạng OOB `clab` trỏ về máy chủ host đang chạy `app.py`; không còn container `.55`). Lưu ý giữ endpoint `POST /alerts` nhận được từ `172.20.20.52` (không bị chặn bởi auth token của người dùng Web).
+  2. Trong `POST /alerts` của [`monitoring/aiops-dashboard/backend/app.py`](monitoring/aiops-dashboard/backend/app.py), thay vì chỉ lưu tạm vào `ENGINE.alertmanager_webhooks`, hãy parse danh sách `body.get("alerts", [])`, ghi cảnh báo hạ tầng (`firing` / `resolved`) vào `audit_logs` + `Alerts` (MongoDB Atlas) và đẩy tiếp sang `notifier.py` để gửi thông báo hạ tầng (`HostDown`, `WANLinkDown`, `HighCpuUsage`...) ra cùng kênh Telegram (chỉ thông báo, **không** tự chạy `iptables` từ webhook hạ tầng tĩnh).
+
 ---
 
 ## 4. Quy tắc Bắt buộc & Vùng Cấm Động (Tránh Làm Hỏng Hệ thống Hiện tại)
@@ -165,4 +171,4 @@ ESCALATION_L3_SECONDS=60
    - Bấm `[✅ Phê duyệt]` trên Telegram → Web chuyển `PROTECTED`, `iptables` chặn đúng IP/điểm chặn, dịch vụ tự về `NORMAL`, tin nhắn Telegram xóa nút cũ và gửi thêm `🟢 ĐÃ HỒI PHỤC`.
    - Không bấm nút → sau `30s` nhận cảnh báo **L2**, sau `60s` tự kích hoạt **L3 Auto-Mitigation** và tự hồi phục về `NORMAL`.
    - Chạy `bash scripts/scenarios/05_transient_spike.sh` → **0 tin nhắn Telegram** (bị lọc ở Tầng 0).
-6. Kiểm tra `git status` chắc chắn **không lọt `.env`** và không có chỉnh sửa ngoài phạm vi (`auth.py`, `notifier.py`, `app.py`, `database.py`, `.env.example`, `frontend/src/`, `frontend/dist/`).
+6. Kiểm tra `git status` chắc chắn **không lọt `.env`** và không có chỉnh sửa ngoài phạm vi (`auth.py`, `notifier.py`, `app.py`, `database.py`, `monitoring/alertmanager/alertmanager.yml`, `.env.example`, `frontend/src/`, `frontend/dist/`).
