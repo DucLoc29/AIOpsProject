@@ -5,6 +5,7 @@ import { StatusPill, faultLabel, normSev, sevLabel } from '../lib.jsx';
 
 export default function ServiceDetailPage({ ctx, selectedService, onSelectService, onNavigate }) {
   const { state, db, approve, rollback } = ctx;
+  const isAdmin = ctx.user?.role === 'ADMIN';
   const evals = state.service_evaluations || {};
   const list = Object.values(evals);
   const ev = evals[selectedService] || list[0];
@@ -77,12 +78,14 @@ export default function ServiceDetailPage({ ctx, selectedService, onSelectServic
       </div>
 
       <div className="apple-card action-box">
+        
         <div className="card-title-row">
           <h3>Xử lý tự động</h3>
           <button className="apple-btn secondary" onClick={() => onNavigate('response')}>
             Xem tất cả cảnh báo &amp; ứng phó →
           </button>
         </div>
+        
         {activeRule ? (
           <>
             <p>
@@ -93,9 +96,13 @@ export default function ServiceDetailPage({ ctx, selectedService, onSelectServic
             <div className="code-snippet">
               <code>{activeRule.command}</code>
             </div>
-            <button className="apple-btn tone-red" onClick={() => rollback(sid)}>
-              Gỡ chặn dịch vụ này
-            </button>
+
+            {isAdmin && (
+              <button className="apple-btn tone-red" onClick={() => rollback(sid)}>
+                Gỡ chặn dịch vụ này
+              </button>
+            )}
+            
           </>
         ) : pendingRule ? (
           <>
@@ -105,9 +112,13 @@ export default function ServiceDetailPage({ ctx, selectedService, onSelectServic
             <div className="code-snippet">
               <code>{pendingRule.remediation.command}</code>
             </div>
-            <button className="apple-btn active" onClick={() => approve(sid)}>
-              Phê duyệt &amp; thực thi
-            </button>
+
+            {isAdmin && (
+              <button className="apple-btn active" onClick={() => approve(sid)}>
+                Phê duyệt &amp; thực thi
+              </button>
+            )}
+
           </>
         ) : (
           <p className="muted">Không cần can thiệp. Dịch vụ đang được giám sát liên tục.</p>

@@ -8,7 +8,7 @@ export const NAV_ITEMS = [
   { id: 'services', label: 'Quản lý dịch vụ', icon: 'server' },
 ];
 
-export default function Sidebar({ view, onChange, state }) {
+export default function Sidebar({ view, onChange, state, user, onLogout }) {
   const hostIp = window.location.hostname || 'localhost';
   const net = state?.network_state || {};
   const alertCount = (net.active_service_rules?.length || 0) + (net.pending_approvals?.length || 0);
@@ -49,13 +49,23 @@ export default function Sidebar({ view, onChange, state }) {
       </div>
 
       <div className="sidebar-footer">
+
+        {user && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, paddingBottom: 8, borderBottom: '1px solid var(--apple-border)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6 }}>
+              <strong style={{ fontSize: '0.82rem' }}>{user.username}</strong>
+              <span className="apple-tag">{user.role}</span>
+            </div>
+            {user.full_name && <div className="footer-line">{user.full_name}</div>}
+            <button type="button" className="apple-btn secondary full" onClick={onLogout}> Đăng xuất </button>
+          </div>
+        )}
+
         <div className={`mongo-chip ${state?.db_stats?.connected ? '' : 'off'}`}>
           <span>●</span>
           <span>{state?.db_stats?.connected ? 'MongoDB Atlas' : 'Bộ nhớ cục bộ (offline)'}</span>
         </div>
-        <div className="footer-line">
-          Containerlab: <strong>{state?.lab_running ? 'Đang chạy' : 'Chưa chạy'}</strong>
-        </div>
+        <div className="footer-line"> Containerlab: <strong>{state?.lab_running ? 'Đang chạy' : 'Chưa chạy'}</strong> </div>
       </div>
     </aside>
   );

@@ -9,10 +9,12 @@ const auditColumns = [
   { key: 'trigger', label: 'Chế độ' },
   { key: 'action', label: 'Hành động' },
   { key: 'status', label: 'Kết quả', render: (r) => <Badge value={r.status} /> },
+  { key: 'actor', label: 'Người thực hiện', render: (r) => r.actor || 'SYSTEM' }
 ];
 
 export default function ResponsePage({ ctx }) {
   const { state, db, approve, rollback, setPolicy } = ctx;
+  const isAdmin = ctx.user?.role === 'ADMIN';
   const net = state.network_state || {};
   const evals = state.service_evaluations || {};
   const list = Object.values(evals);
@@ -33,23 +35,30 @@ export default function ResponsePage({ ctx }) {
       <div className="apple-card">
         <div className="card-title-row">
           <h3>Chế độ xử lý</h3>
-          <button className="apple-btn secondary" onClick={() => rollback()}>
-            Gỡ chặn tất cả dịch vụ
-          </button>
+          {
+            isAdmin &&  (
+            <button className="apple-btn secondary" onClick={() => rollback()}>
+              Gỡ chặn tất cả dịch vụ
+            </button>)
+          }
         </div>
         <div className="mode-row">
           <button
             className={`apple-btn ${auto ? 'active' : ''}`}
             onClick={() => setPolicy({ auto_pilot: true })}
+            disabled={!isAdmin}
           >
             Tự động (Auto-Pilot)
           </button>
+          
           <button
             className={`apple-btn ${!auto ? 'active' : ''}`}
             onClick={() => setPolicy({ auto_pilot: false })}
+            disabled={!isAdmin}
           >
             Chờ phê duyệt (Human-in-the-Loop)
           </button>
+
           <span className="muted">
             {auto
               ? 'Hệ thống tự chặn ngay khi xác định được nguyên nhân.'
@@ -70,9 +79,13 @@ export default function ResponsePage({ ctx }) {
           <div className="code-snippet">
             <code>{p.remediation.command}</code>
           </div>
-          <button className="apple-btn active" onClick={() => approve(p.service_id)}>
-            Phê duyệt &amp; thực thi
-          </button>
+          
+          {isAdmin && (
+            <button className="apple-btn active" onClick={() => approve(p.service_id)}>
+              Phê duyệt &amp; thực thi
+            </button>
+          )}
+
         </div>
       ))}
 
@@ -113,7 +126,7 @@ export default function ResponsePage({ ctx }) {
                       )}
                     </td>
                     <td>
-                      {rule && (
+                      {isAdmin && rule && (
                         <button className="apple-btn secondary" onClick={() => rollback(ev.service_id)}>
                           Gỡ chặn
                         </button>

@@ -6,6 +6,7 @@ import OverviewPage from './pages/OverviewPage.jsx';
 import ServiceDetailPage from './pages/ServiceDetailPage.jsx';
 import ResponsePage from './pages/ResponsePage.jsx';
 import ServicesPage from './pages/ServicesPage.jsx';
+import LoginPage from './pages/LoginPage.jsx';
 
 function initialView() {
   const hash = window.location.hash.replace('#/', '');
@@ -20,6 +21,13 @@ export default function App() {
   useEffect(() => {
     window.location.hash = `/${view}`;
   }, [view]);
+
+  if (!ctx.authReady) {
+    return <div className="boot-screen">Đang kiểm tra phiên đăng nhập...</div>;
+  }
+  if (!ctx.user) {
+    return <LoginPage onLogin={ctx.login} />;
+  }
 
   if (!ctx.state) {
     return (
@@ -36,7 +44,7 @@ export default function App() {
 
   return (
     <div className="app-layout">
-      <Sidebar view={view} onChange={setView} state={ctx.state} />
+      <Sidebar view={view} onChange={setView} state={ctx.state} user={ctx.user} onLogout={ctx.logout}/>
       <div className="main-workspace">
         <Topbar view={view} state={ctx.state} />
         <main className="content-body">
