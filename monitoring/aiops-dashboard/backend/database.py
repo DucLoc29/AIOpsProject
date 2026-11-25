@@ -18,6 +18,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from auth import hash_password
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 ENV_FILE = PROJECT_ROOT / ".env"
 
@@ -153,6 +155,23 @@ IP_TO_OOB = {
 }
 
 
+def build_default_users() -> List[Dict[str, Any]]:
+    """Tạo 2 tài khoản mặc định (admin / viewer) với mật khẩu đã băm PBKDF2-SHA256."""
+    return [
+        {
+            "username": "admin",
+            "password_hash": hash_password("admin123"),
+            "role": "ADMIN",
+            "full_name": "Quản trị viên NOC/SOC",
+        },
+        {
+            "username": "viewer",
+            "password_hash": hash_password("viewer123"),
+            "role": "VIEWER",
+            "full_name": "Giám sát viên (Chỉ đọc)",
+        },
+    ]
+
 class AIOpsDatabase:
     """Quản lý kết nối MongoDB Atlas (5 bảng) kèm CRUD Services & bộ nhớ đệm an toàn."""
 
@@ -170,12 +189,14 @@ class AIOpsDatabase:
         self.ai_results_cache: List[Dict[str, Any]] = []
         self.alerts_cache: List[Dict[str, Any]] = []
         self.remediations_cache: List[Dict[str, Any]] = []
+        self.users_cache: List[Dict[str, Any]] = build_default_users()
         self.counts: Dict[str, int] = {
             "Services": len(self.services_cache),
             "AlertRules": len(self.rules_cache),
             "AIResults": 0,
             "Alerts": 0,
             "RemediationActions": 0,
+            "Users": len(self.users_cache), 
         }
 
         self._connect_and_seed()
@@ -209,7 +230,7 @@ class AIOpsDatabase:
             print(f"[✓] Đã kết nối thành công tới MongoDB Atlas: {self.db_name}")
 
             existing_cols = set(self.db.list_collection_names())
-            for col_name in ("Services", "AlertRules", "AIResults", "Alerts", "RemediationActions"):
+            for col_name in ("Services", "AlertRules", "AIResults", "Alerts", "RemediationActions", "Users"):
                 if col_name not in existing_cols:
                     self.db.create_collection(col_name)
 
@@ -232,6 +253,10 @@ class AIOpsDatabase:
                 self.db["AlertRules"].delete_many({})
                 self.db["AlertRules"].insert_many([dict(r) for r in DEFAULT_ALERT_RULES])
 
+            if self.db["Users"].count_documents({}) == 0:
+                self.db["Users"].insert_many([dict(u) for u in self.users_cache])
+                print(" -> Đã khởi tạo bảng 'Users' (admin / viewer) trên MongoDB Atlas")
+            
             self._refresh_caches()
         except Exception as exc:
             self.connected = False
@@ -391,15 +416,29 @@ class AIOpsDatabase:
             self.remediations_cache = list(
                 self.db["RemediationActions"].find({}, {"_id": 0}).sort("timestamp", -1).limit(15)
             )
+            
+            db_users = list(self.db["Users"].find({}, {"_id": 0}))
+            if db_users:
+                self.users_cache = db_users
+
             self.counts = {
                 "Services": len(self.services_cache),
                 "AlertRules": len(self.rules_cache),
                 "AIResults": self.db["AIResults"].count_documents({}),
                 "Alerts": self.db["Alerts"].count_documents({}),
                 "RemediationActions": self.db["RemediationActions"].count_documents({}),
+                "Users": len(self.users_cache),
             }
         except Exception:
             pass
+
+    def get_user_by_username(self, username: str) -> Optional[Dict[str, Any]]:
+        """Tìm tài khoản từ RAM cache (không gọi mạng tới MongoDB Atlas)."""
+        uname = str(username or "").strip().lower()
+        for u in self.users_cache:
+            if str(u.get("username", "")).lower() == uname:
+                return u
+        return None
 
     def get_policy_config(self) -> Dict[str, Any]:
         for r in self.rules_cache:
@@ -511,6 +550,7 @@ class AIOpsDatabase:
         target_device: str,
         action_text: str,
         status: str,
+        actor: str = "SYSTEM"
     ) -> None:
         now_str = datetime.now().strftime("%H:%M:%S")
         rem_doc = {
@@ -526,6 +566,7 @@ class AIOpsDatabase:
             "target": target_device,
             "action": action_text,
             "status": status,
+            "actor": actor, 
         }
         self.remediations_cache.insert(0, rem_doc)
         self.remediations_cache = self.remediations_cache[:20]

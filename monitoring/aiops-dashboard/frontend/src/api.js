@@ -1,7 +1,28 @@
-async function request(path, options) {
-  const res = await fetch(path, options);
-  if (!res.ok) throw new Error(`${path} -> ${res.status}`);
-  return res.json();
+const TOKEN_KEY = 'aiops_token';
+
+export const tokenStore = {
+  get: () => localStorage.getItem(TOKEN_KEY) || '',
+  set: (token) => localStorage.setItem(TOKEN_KEY, token),
+  clear: () => localStorage.removeItem(TOKEN_KEY),
+};
+
+async function request(path, options = {}) {
+  const token = tokenStore.get();
+  const headers = { ...(options.headers || {}) };
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  const res = await fetch(path, { ...options, headers });
+
+  const data = await res.json().catch(() => ({}));
+
+  if (!res.ok) {
+    if (res.status === 401) tokenStore.clear();
+    const err = new Error(data.error || `${path} -> ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
+
+  return data;
 }
 
 const sendJson = (method, path, body) =>
@@ -20,4 +41,7 @@ export const api = {
   createService: (payload) => sendJson('POST', '/api/services', payload),
   updateService: (service_id, payload) => sendJson('PUT', `/api/services/${service_id}`, payload),
   deleteService: (service_id) => sendJson('DELETE', `/api/services/${service_id}`, { service_id }),
+  login: (username, password) => sendJson('POST', '/api/auth/login', { username, password }),
+  logout: () => sendJson('POST', '/api/auth/logout', {}),
+  me: () => request('/api/auth/me')
 };

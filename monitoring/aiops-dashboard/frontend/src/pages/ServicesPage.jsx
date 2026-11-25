@@ -13,6 +13,7 @@ const EMPTY_FORM = {
 
 export default function ServicesPage({ ctx, onOpenService }) {
   const { db, state, createService, updateService, deleteService } = ctx;
+  const isAdmin = ctx.user?.role === 'ADMIN';
   const services = db?.Services || [];
   const evals = state?.service_evaluations || {};
 
@@ -80,17 +81,17 @@ export default function ServicesPage({ ctx, onOpenService }) {
       label: 'Thao tác',
       render: (s) => (
         <div className="row-actions">
-          <button className="apple-btn active" onClick={() => onOpenService(s.service_id)}>
-            Chi tiết
-          </button>
-          <button className="apple-btn secondary" onClick={() => startEdit(s)}>
-            Sửa
-          </button>
-          {services.length > 1 && (
-            <button className="apple-btn tone-red" onClick={() => deleteService(s.service_id)}>
-              Xóa
-            </button>
+          <button className="apple-btn active" onClick={() => onOpenService(s.service_id)}> Chi tiết </button>
+          
+          {isAdmin && (
+            <>
+              <button className="apple-btn secondary" onClick={() => startEdit(s)}> Sửa </button>
+              {services.length > 1 && (
+                <button className="apple-btn tone-red" onClick={() => deleteService(s.service_id)}> Xóa </button>
+              )}
+            </>
           )}
+
         </div>
       ),
     },
@@ -101,12 +102,14 @@ export default function ServicesPage({ ctx, onOpenService }) {
       <div className="apple-card">
         <div className="card-title-row">
           <h3>Danh sách dịch vụ ({services.length})</h3>
-          <button className="apple-btn active" onClick={() => (showForm ? setShowForm(false) : startAdd())}>
-            {showForm ? 'Đóng' : '+ Thêm dịch vụ'}
-          </button>
+          {isAdmin && (
+            <button className="apple-btn active" onClick={() => (showForm ? setShowForm(false) : startAdd())}>
+              {showForm ? 'Đóng' : '+ Thêm dịch vụ'}
+            </button>
+          )}
         </div>
 
-        {showForm && (
+        {isAdmin && showForm && (
           <form className="svc-form" onSubmit={submit}>
             <label>
               <span>Tên dịch vụ *</span>

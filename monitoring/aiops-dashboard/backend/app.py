@@ -54,6 +54,14 @@ from prepare_two_stage_datasets import (  # noqa: E402
     compute_sustained_thresholds,
 )
 from database import AIOpsDatabase  # noqa: E402
+from auth import (  # noqa: E402
+    create_token,
+    extract_bearer_token,
+    revoke_token,
+    verify_password,
+    verify_token,
+)
+
 from remediation import (  # noqa: E402
     build_service_remediation_plan,
     ensure_background_normal_traffic,
@@ -905,6 +913,7 @@ class AIOpsStateEngine:
         conf_str: str,
         mode: str,
         result_id: str = "manual",
+        actor: str = "AUTO-PILOT"
     ) -> None:
         def _worker() -> None:
             sid = service["service_id"]
@@ -924,6 +933,7 @@ class AIOpsStateEngine:
                         "target": target_str,
                         "action": action_str,
                         "status": "REMEDIATED",
+                        "actor": actor,
                     },
                 )
                 self.audit_logs = self.audit_logs[:30]
@@ -937,12 +947,13 @@ class AIOpsStateEngine:
                     target_device=target_str,
                     action_text=action_str,
                     status="REMEDIATED",
+                    actor=actor,
                 )
                 self._patch_latest_state_unlocked()
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def approve_pending(self, service_id: str | None = None) -> Dict[str, Any]:
+    def approve_pending(self, service_id: str | None = None, actor: str = "admin (Web)") -> Dict[str, Any]:
         to_run: List[Tuple[Dict[str, Any], Dict[str, Any], str, str, str]] = []
         with self._lock:
             target_ids = (
@@ -966,10 +977,10 @@ class AIOpsStateEngine:
             st = self._patch_latest_state_unlocked()
 
         for srv_doc, plan, conf_str, mode, result_id in to_run:
-            self._run_remediation_async(srv_doc, plan, conf_str, mode, result_id)
+            self._run_remediation_async(srv_doc, plan, conf_str, mode, result_id, actor=actor)
         return st
 
-    def rollback_service_or_all(self, service_id: str | None = None) -> Dict[str, Any]:
+    def rollback_service_or_all(self, service_id: str | None = None, actor: str = "admin (Web)") -> Dict[str, Any]:
         with self._lock:
             if service_id and service_id in self.active_service_rules:
                 rule = self.active_service_rules.pop(service_id)
@@ -993,6 +1004,7 @@ class AIOpsStateEngine:
                         "target": target_str,
                         "action": action_str,
                         "status": "ROLLED_BACK",
+                        "actor": actor,
                     },
                 )
                 self.audit_logs = self.audit_logs[:30]
@@ -1006,6 +1018,7 @@ class AIOpsStateEngine:
                     target_device=target_str,
                     action_text=action_str,
                     status="ROLLED_BACK",
+                    actor=actor
                 )
                 st = self._patch_latest_state_unlocked()
 
@@ -1035,6 +1048,7 @@ class AIOpsStateEngine:
                         "target": "All Services & Firewalls",
                         "action": action_str,
                         "status": "ROLLED_BACK",
+                        "actor": actor,
                     },
                 )
                 self.audit_logs = self.audit_logs[:30]
@@ -1048,6 +1062,7 @@ class AIOpsStateEngine:
                     target_device="All Services & Firewalls",
                     action_text=action_str,
                     status="ROLLED_BACK",
+                    actor=actor
                 )
                 st = self._patch_latest_state_unlocked()
 
@@ -1083,6 +1098,25 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
+    def _is_local_request(self) -> bool:
+        """Kiểm tra request có đến từ localhost (để scripts/verify.sh không bị chặn)."""
+        return self.client_address[0] in ("127.0.0.1", "::1")
+
+    def _require_auth(self, admin_only: bool = False) -> Dict[str, Any] | None:
+        """Xác thực Bearer Token; nếu admin_only=True thì chỉ cho phép role ADMIN."""
+        token = extract_bearer_token(self.headers)
+        user = verify_token(token) if token else None
+        
+        if not user:
+            self._send_json({"error": "Chưa đăng nhập hoặc phiên đã hết hạn"}, status=401)
+            return None
+        
+        if admin_only and user.get("role") != "ADMIN":
+            self._send_json({"error": "Chỉ ADMIN mới có quyền thao tác"}, status=403)
+            return None
+        
+        return user
+
     def _send_file(self, file_path: Path) -> None:
         if not file_path.exists() or not file_path.is_file():
             self.send_error(404, "File Not Found")
@@ -1116,9 +1150,22 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
         self._send_file(target)
 
     def do_GET(self) -> None:
-        if self.path.startswith("/api/state"):
-            self._send_json(ENGINE.get_latest_state())
+        if self.path.startswith("/api/auth/me"):
+            user = self._require_auth()
+            if not user:
+                return
+            self._send_json({"user": user})
+
+        elif self.path.startswith("/api/state"):
+            if not self._is_local_request() and not self._require_auth():
+                return
+            self._send_json(ENGINE.get_latest_state())          
+
         elif self.path.startswith("/api/database"):
+
+            if not self._require_auth():
+                return
+            
             # Trả dữ liệu bộ nhớ đệm tức thì (< 2ms), KHÔNG chặn HTTP bằng 8 truy vấn mạng tới MongoDB Atlas mỗi 2 giây!
             with ENGINE._lock:
                 payload = {
@@ -1130,17 +1177,70 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
                     "RemediationActions": list(ENGINE.db.remediations_cache[:12]),
                 }
             self._send_json(payload)
+
         elif self.path.startswith("/api/services"):
+            
+            if not self._require_auth(): 
+                return
+            
             with ENGINE._lock:
                 services = list(ENGINE.db.services_cache)
             self._send_json({"Services": services})
+        
         elif self.path.startswith("/api/"):
             self.send_error(404, "Unknown API endpoint")
+        
         else:
             self._serve_frontend()
 
     def do_POST(self) -> None:
         body = self._read_json_body()
+
+        if self.path == "/api/auth/login":
+            username = str(body.get("username", "")).strip()
+            password = str(body.get("password", ""))
+            user_doc = ENGINE.db.get_user_by_username(username)
+
+            if not user_doc or not verify_password(password, user_doc.get("password_hash", "")):
+                self._send_json({"error": "Sai tên đăng nhập hoặc mật khẩu"}, status=401)
+                return
+            
+            token = create_token({
+                'username': user_doc["username"],
+                'role': user_doc["role"],
+                'full_name': user_doc.get("full_name", ""),
+            })
+
+            self._send_json({
+                "token": token,
+                "user": {
+                    "username": user_doc["username"],
+                    "role": user_doc["role"],
+                    "full_name": user_doc.get("full_name", ""),
+                },
+            })
+            return
+        
+        elif self.path == "/api/auth/logout":
+            token = extract_bearer_token(self.headers)
+            if token:
+                revoke_token(token)
+            self._send_json({"status": "ok"})
+            return
+        
+        elif self.path == "/alerts":
+            ENGINE.alertmanager_webhooks.insert(
+                0, {"time": datetime.now().strftime("%H:%M:%S"), "payload": body}
+            )
+            self._send_json({"status": "ok"})
+            return
+
+        # Toàn bộ API ghi bên dưới bắt buộc phải là ADMIN
+        user = self._require_auth(admin_only=True)
+        if not user:
+            return
+        
+        actor = f"{user['username']} (Web)"
 
         if self.path == "/api/policy":
             with ENGINE._lock:
@@ -1153,12 +1253,15 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
                 )
                 state = ENGINE._patch_latest_state_unlocked()
             self._send_json(state)
+
         elif self.path == "/api/approve":
-            state = ENGINE.approve_pending(service_id=body.get("service_id"))
+            state = ENGINE.approve_pending(service_id=body.get("service_id"), actor=actor)
             self._send_json(state)
+
         elif self.path == "/api/rollback":
-            state = ENGINE.rollback_service_or_all(service_id=body.get("service_id"))
+            state = ENGINE.rollback_service_or_all(service_id=body.get("service_id"), actor=actor)
             self._send_json(state)
+        
         elif self.path.startswith("/api/services"):
             with ENGINE._lock:
                 ENGINE.db.create_service(body)
@@ -1171,17 +1274,17 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
                     daemon=True,
                 ).start()
             self._send_json(state)
-        elif self.path == "/alerts":
-            ENGINE.alertmanager_webhooks.insert(
-                0, {"time": datetime.now().strftime("%H:%M:%S"), "payload": body}
-            )
-            self._send_json({"status": "ok"})
+
         else:
             self.send_error(404, "Unknown API endpoint")
 
     def do_PUT(self) -> None:
         body = self._read_json_body()
         if self.path.startswith("/api/services"):
+            
+            if not self._require_auth(admin_only=True):
+                return
+            
             parts = self.path.rstrip("/").split("/")
             sid = parts[3] if len(parts) > 3 else str(body.get("service_id", ""))
             with ENGINE._lock:
@@ -1201,6 +1304,10 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         body = self._read_json_body()
         if self.path.startswith("/api/services"):
+
+            if not self._require_auth(admin_only=True):
+                return
+            
             parts = self.path.rstrip("/").split("/")
             sid = parts[3] if len(parts) > 3 else str(body.get("service_id", ""))
             with ENGINE._lock:
