@@ -6,12 +6,18 @@ export const NAV_ITEMS = [
   { id: 'service-detail', label: 'Chi tiết dịch vụ', icon: 'chart' },
   { id: 'response', label: 'Ứng phó & Cảnh báo', icon: 'shield' },
   { id: 'services', label: 'Quản lý dịch vụ', icon: 'server' },
+  { id: 'users', label: 'Quản lý tài khoản', icon: 'users', adminOnly: true }
 ];
 
 export default function Sidebar({ view, onChange, state, user, onLogout }) {
   const hostIp = window.location.hostname || 'localhost';
   const net = state?.network_state || {};
   const alertCount = (net.active_service_rules?.length || 0) + (net.pending_approvals?.length || 0);
+
+  //lọc danh sách menu theo quyền: Nếu là admin (2nd: True) hiện 5 item, là viewer(1st: 4 items; 2nd: false)
+  const visibleItems = NAV_ITEMS.filter(
+    (item) => !item.adminOnly || user?.role === 'ADMIN'
+  );
 
   return (
     <aside className="apple-sidebar">
@@ -21,7 +27,7 @@ export default function Sidebar({ view, onChange, state, user, onLogout }) {
       </div>
 
       <nav className="sidebar-nav">
-        {NAV_ITEMS.map((item) => (
+        {visibleItems.map((item) => (
           <button
             key={item.id}
             className={`nav-item ${view === item.id ? 'active' : ''}`}

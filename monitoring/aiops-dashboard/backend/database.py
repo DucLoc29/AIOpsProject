@@ -16,7 +16,7 @@ import re
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from auth import hash_password
 
@@ -439,6 +439,114 @@ class AIOpsDatabase:
             if str(u.get("username", "")).lower() == uname:
                 return u
         return None
+
+    # CRUD Users
+    @staticmethod
+    def _public_user(user: Dict[str, Any]) -> Dict[str, Any]:
+        """Trả về thông tin user (ko có password_hash)."""
+        return {
+            "username": user.get("username", ""),
+            "role": user.get("role", "VIEWER"),
+            "full_name": user.get("full_name", ""),
+        }
+
+    def list_users(self) -> List[Dict[str, Any]]:
+        """Lấy danh sách toàn bộ tài khoản (không kèm mật khẩu băm)."""
+        return [self._public_user(u) for u in self.users_cache]
+
+    def create_user(
+        self, payload: Dict[str, Any]
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        uname = str(payload.get("username", "")).strip().lower()
+        password = str(payload.get("password", ""))
+        role = str(payload.get("role", "VIEWER")).strip().upper()
+        full_name = str(payload.get("full_name", "")).strip() or uname
+
+        if not uname or not re.match(r"^[a-z0-9_.-]{3,32}$", uname):
+            return None, "Tên đăng nhập phải từ 3–32 ký tự (chữ thường, số, _, ., -)"
+        if len(password) < 4:
+            return None, "Mật khẩu phải có ít nhất 4 ký tự"
+        if role not in ("ADMIN", "VIEWER"):
+            return None, "Vai trò chỉ chấp nhận ADMIN hoặc VIEWER"
+        if self.get_user_by_username(uname) is not None:
+            return None, f"Tài khoản '{uname}' đã tồn tại"
+
+        new_doc: Dict[str, Any] = {
+            "username": uname,
+            "password_hash": hash_password(password),
+            "role": role,
+            "full_name": full_name,
+        }
+        self.users_cache.append(dict(new_doc))
+        self.counts["Users"] = len(self.users_cache)
+
+        if self.connected and self.db is not None:
+            doc_copy = dict(new_doc)
+            self._run_async(
+                lambda: self.db["Users"].update_one(
+                    {"username": uname}, {"$set": doc_copy}, upsert=True
+                )
+            )
+        return self._public_user(new_doc), None
+
+    def update_user(
+        self, username: str, payload: Dict[str, Any]
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        target = self.get_user_by_username(username)
+        if target is None:
+            return None, f"Không tìm thấy tài khoản '{username}'"
+
+        uname = target["username"]
+        new_role = str(payload.get("role", target["role"])).strip().upper()
+        if new_role not in ("ADMIN", "VIEWER"):
+            return None, "Vai trò chỉ chấp nhận ADMIN hoặc VIEWER"
+
+        # Chặn hạ quyền nếu đây là ADMIN cuối cùng trong hệ thống
+        if target.get("role") == "ADMIN" and new_role != "ADMIN":
+            admin_count = sum(1 for u in self.users_cache if u.get("role") == "ADMIN")
+            if admin_count <= 1:
+                return None, "Phải giữ ít nhất 1 tài khoản ADMIN trong hệ thống"
+
+        updates: Dict[str, Any] = {
+            "role": new_role,
+            "full_name": str(payload.get("full_name", target.get("full_name", ""))).strip(),
+        }
+        new_password = str(payload.get("password", ""))
+        if new_password:
+            if len(new_password) < 4:
+                return None, "Mật khẩu mới phải có ít nhất 4 ký tự"
+            updates["password_hash"] = hash_password(new_password)
+
+        target.update(updates)
+        if self.connected and self.db is not None:
+            upd_copy = dict(updates)
+            self._run_async(
+                lambda: self.db["Users"].update_one({"username": uname}, {"$set": upd_copy})
+            )
+        return self._public_user(target), None
+
+    def delete_user(
+        self, username: str, current_username: str = ""
+    ) -> Tuple[bool, Optional[str]]:
+        target = self.get_user_by_username(username)
+        if target is None:
+            return False, f"Không tìm thấy tài khoản '{username}'"
+
+        uname = target["username"]
+        if current_username and uname == current_username.strip().lower():
+            return False, "Không thể tự xóa tài khoản đang đăng nhập"
+
+        if target.get("role") == "ADMIN":
+            admin_count = sum(1 for u in self.users_cache if u.get("role") == "ADMIN")
+            if admin_count <= 1:
+                return False, "Phải giữ ít nhất 1 tài khoản ADMIN trong hệ thống"
+
+        self.users_cache = [u for u in self.users_cache if u["username"] != uname]
+        self.counts["Users"] = len(self.users_cache)
+
+        if self.connected and self.db is not None:
+            self._run_async(lambda: self.db["Users"].delete_one({"username": uname}))
+        return True, None
 
     def get_policy_config(self) -> Dict[str, Any]:
         for r in self.rules_cache:

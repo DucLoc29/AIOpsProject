@@ -7,6 +7,7 @@ import ServiceDetailPage from './pages/ServiceDetailPage.jsx';
 import ResponsePage from './pages/ResponsePage.jsx';
 import ServicesPage from './pages/ServicesPage.jsx';
 import LoginPage from './pages/LoginPage.jsx';
+import UsersPage from './pages/UsersPage.jsx';
 
 function initialView() {
   const hash = window.location.hash.replace('#/', '');
@@ -42,6 +43,10 @@ export default function App() {
     setView('service-detail');
   };
 
+  // Chặn trường hợp `VIEWER` tự gõ `#/users` trên thanh địa chỉ)
+  // view !users => view | view users & admin => view | víew users & !admin => overview
+  const activeView = view === 'users' && ctx.user.role !== 'ADMIN' ? 'overview' : view;
+
   return (
     <div className="app-layout">
       <Sidebar view={view} onChange={setView} state={ctx.state} user={ctx.user} onLogout={ctx.logout}/>
@@ -49,7 +54,7 @@ export default function App() {
         <Topbar view={view} state={ctx.state} />
         <main className="content-body">
           {ctx.error && <div className="error-banner">Mất kết nối Backend: {ctx.error}</div>}
-          {view === 'overview' && <OverviewPage ctx={ctx} onOpenService={openService} />}
+          {activeView === 'overview' && <OverviewPage ctx={ctx} onOpenService={openService} />}
           {view === 'service-detail' && (
             <ServiceDetailPage
               ctx={ctx}
@@ -60,6 +65,7 @@ export default function App() {
           )}
           {view === 'response' && <ResponsePage ctx={ctx} />}
           {view === 'services' && <ServicesPage ctx={ctx} onOpenService={openService} />}
+          {view === 'users' && ctx.user.role === 'ADMIN' && <UsersPage ctx={ctx} />}
         </main>
       </div>
     </div>

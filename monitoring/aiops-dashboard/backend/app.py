@@ -1187,6 +1187,13 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
                 services = list(ENGINE.db.services_cache)
             self._send_json({"Services": services})
         
+        elif self.path.startswith("/api/users"):
+            if not self._require_auth(admin_only=True):
+                return
+            with ENGINE._lock:
+                users = ENGINE.db.list_users()
+            self._send_json({"Users": users})        
+
         elif self.path.startswith("/api/"):
             self.send_error(404, "Unknown API endpoint")
         
@@ -1275,6 +1282,15 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
                 ).start()
             self._send_json(state)
 
+        elif self.path.rstrip("/") == "/api/users":
+            with ENGINE._lock:
+                created, err = ENGINE.db.create_user(body)
+                users = ENGINE.db.list_users()
+            if err:
+                self._send_json({"error": err}, status=400)
+                return
+            self._send_json({"user": created, "Users": users}, status=201)
+
         else:
             self.send_error(404, "Unknown API endpoint")
 
@@ -1298,6 +1314,20 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
                     daemon=True,
                 ).start()
             self._send_json(state)
+
+        elif self.path.startswith("/api/users"):
+            if not self._require_auth(admin_only=True):
+                return
+            parts = self.path.split("?", 1)[0].rstrip("/").split("/")
+            uname = parts[3] if len(parts) > 3 else str(body.get("username", ""))
+            with ENGINE._lock:
+                updated, err = ENGINE.db.update_user(uname, body)
+                users = ENGINE.db.list_users()
+            if err:
+                self._send_json({"error": err}, status=400)
+                return
+            self._send_json({"user": updated, "Users": users})        
+
         else:
             self.send_error(404, "Unknown API endpoint")
 
@@ -1318,6 +1348,21 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
                 ENGINE.pending_approvals.pop(sid, None)
                 state = ENGINE._patch_latest_state_unlocked()
             self._send_json(state)
+        
+        elif self.path.startswith("/api/users"):
+            user = self._require_auth(admin_only=True)
+            if not user:
+                return
+            parts = self.path.split("?", 1)[0].rstrip("/").split("/")
+            uname = parts[3] if len(parts) > 3 else str(body.get("username", ""))
+            with ENGINE._lock:
+                ok, err = ENGINE.db.delete_user(uname, current_username=user["username"])
+                users = ENGINE.db.list_users()
+            if not ok:
+                self._send_json({"error": err}, status=400)
+                return
+            self._send_json({"status": "ok", "Users": users})        
+        
         else:
             self.send_error(404, "Unknown API endpoint")
 

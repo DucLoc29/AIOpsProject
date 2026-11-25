@@ -6,6 +6,7 @@ const TITLES = {
   'service-detail': ['Chi tiết dịch vụ', 'Chỉ số, dự báo, nguyên nhân và xử lý của một dịch vụ'],
   response: ['Ứng phó & Cảnh báo', 'Luật chặn đang áp dụng, cảnh báo và nhật ký xử lý'],
   services: ['Quản lý dịch vụ', 'Thêm, sửa, xóa các dịch vụ được giám sát'],
+  users: ['Quản lý tài khoản', 'Thêm, sửa, phân quyền và xóa tài khoản truy cập'],
 };
 
 export default function Topbar({ view, state }) {
