@@ -52,8 +52,20 @@ fi
 
 # 6. Khởi chạy nền AIOps Command Center Web Server (:5000)
 pkill -f "aiops-dashboard/backend/app.py" 2>/dev/null || true
-USER_SITE=$(find "/home/${SUDO_USER:-$USER}/.local/lib" -maxdepth 2 -name "site-packages" 2>/dev/null | tr '\n' ':' || true)
-PYTHONPATH="${USER_SITE}${PYTHONPATH:-}" nohup python3 monitoring/aiops-dashboard/backend/app.py >/tmp/aiops_dashboard.log 2>&1 &
+sudo rm -f /tmp/aiops_dashboard.log 2>/dev/null || rm -f /tmp/aiops_dashboard.log 2>/dev/null || true
+PY_BIN=""
+for py_candidate in ".venv/bin/python" ".venv/bin/python3" "venv/bin/python" "venv/bin/python3"; do
+  if [ -x "$py_candidate" ]; then
+    PY_BIN="$py_candidate"
+    break
+  fi
+done
+if [ -n "$PY_BIN" ]; then
+  nohup "$PY_BIN" monitoring/aiops-dashboard/backend/app.py </dev/null >/tmp/aiops_dashboard.log 2>&1 &
+else
+  USER_SITE=$(find "/home/${SUDO_USER:-$USER}/.local/lib" -maxdepth 2 -name "site-packages" 2>/dev/null | tr '\n' ':' || true)
+  PYTHONPATH="${USER_SITE}${PYTHONPATH:-}" nohup python3 monitoring/aiops-dashboard/backend/app.py </dev/null >/tmp/aiops_dashboard.log 2>&1 &
+fi
 
 echo
 echo "[✓] Deploy xong (Lab + AIOps Command Center tại http://localhost:5000). Kiểm tra: ./scripts/verify.sh"
