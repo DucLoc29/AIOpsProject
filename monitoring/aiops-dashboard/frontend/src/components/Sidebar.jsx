@@ -52,39 +52,44 @@ export default function Sidebar({ view, onChange, state, user, onLogout, onOpenC
         </a>
       </div>
 
-      <div className="sidebar-footer">
-        {user && (
+      {user && (
+        <div className="sidebar-footer">
           <div className="sidebar-user-card">
-            <div className="sidebar-user-head">
-              <strong>{user.username}</strong>
-              <span className={`role-pill ${user.role === 'ADMIN' ? 'role-admin' : 'role-viewer'}`}>
-                {user.role}
-              </span>
+            <div className="sidebar-user-profile">
+              <div className={`user-avatar ${user.role === 'ADMIN' ? 'is-admin' : ''}`}>
+                {(user.username || 'U').slice(0, 1).toUpperCase()}
+              </div>
+              <div className="sidebar-user-meta">
+                <div className="sidebar-user-head">
+                  <strong>{user.username}</strong>
+                  <span className={`role-pill ${user.role === 'ADMIN' ? 'role-admin' : 'role-viewer'}`}>
+                    {user.role}
+                  </span>
+                </div>
+                {user.full_name && <div className="sidebar-user-fullname">{user.full_name}</div>}
+              </div>
             </div>
-            {user.full_name && <div className="footer-line">{user.full_name}</div>}
             <div className="sidebar-user-actions">
               <button
                 type="button"
-                className="apple-btn secondary"
+                className="user-action-btn"
                 onClick={onOpenChangePassword}
               >
-                Đổi MK
+                <Icon name="key" size={14} />
+                <span>Đổi MK</span>
               </button>
-              <button type="button" className="apple-btn tone-red" onClick={onLogout}>
-                Đăng xuất
+              <button
+                type="button"
+                className="user-action-btn danger"
+                onClick={onLogout}
+              >
+                <Icon name="logout" size={14} />
+                <span>Đăng xuất</span>
               </button>
             </div>
           </div>
-        )}
-
-        <div className={`mongo-chip ${state?.db_stats?.connected ? '' : 'off'}`}>
-          <span>●</span>
-          <span>{state?.db_stats?.connected ? 'MongoDB Atlas' : 'Bộ nhớ cục bộ (offline)'}</span>
         </div>
-        <div className="footer-line">
-          Containerlab: <strong>{state?.lab_running ? 'Đang chạy' : 'Chưa chạy'}</strong>
-        </div>
-      </div>
+      )}
     </aside>
   );
 }
