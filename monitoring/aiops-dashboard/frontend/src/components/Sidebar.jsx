@@ -75,16 +75,14 @@ export default function Sidebar({ view, onChange, state, user, onLogout, onOpenC
                 className="user-action-btn"
                 onClick={onOpenChangePassword}
               >
-                <Icon name="key" size={14} />
-                <span>Đổi MK</span>
+                Đổi MK
               </button>
               <button
                 type="button"
                 className="user-action-btn danger"
                 onClick={onLogout}
               >
-                <Icon name="logout" size={14} />
-                <span>Đăng xuất</span>
+                Đăng xuất
               </button>
             </div>
           </div>
