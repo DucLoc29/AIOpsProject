@@ -229,12 +229,12 @@ export default function UsersPage({ ctx }) {
         </div>
         <div className="apple-card summary-box">
           <span>Quản trị viên (ADMIN)</span>
-          <strong style={{ color: 'var(--apple-blue)' }}>{stats.admins}</strong>
+          <strong style={{ color: '#1d1d1f' }}>{stats.admins}</strong>
           <em>Toàn quyền điều khiển &amp; CRUD</em>
         </div>
         <div className="apple-card summary-box">
           <span>Giám sát viên (VIEWER)</span>
-          <strong className="sev-text-NORMAL">{stats.viewers}</strong>
+          <strong className="sev-text-MEDIUM">{stats.viewers}</strong>
           <em>Chỉ xem giám sát &amp; nhật ký</em>
         </div>
         <div className="apple-card summary-box">

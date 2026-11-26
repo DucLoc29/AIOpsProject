@@ -1072,8 +1072,8 @@ body {
 .pw-toggle { position: absolute; right: 10px; background: none; border: none; color: var(--apple-blue); font-size: 0.76rem; font-weight: 600; cursor: pointer; padding: 4px 6px; }
 
 .role-pill { display: inline-block; font-size: 0.7rem; font-weight: 700; padding: 3px 9px; border-radius: 999px; letter-spacing: 0.02em; }
-.role-admin { background: var(--apple-blue-soft); color: var(--apple-blue); }
-.role-viewer { background: #f2f2f7; color: var(--apple-text-secondary); }
+.role-admin { background: #1d1d1f; color: #ffffff; }
+.role-viewer { background: #fff8d6; color: #8a6d00; }
 
 .status-badge { display: inline-block; font-size: 0.72rem; font-weight: 700; padding: 3px 10px; border-radius: 999px; }
 .st-active { background: var(--apple-green-soft); color: var(--apple-green-text); }
@@ -1089,8 +1089,8 @@ body {
   width: 36px;
   height: 36px;
   border-radius: 50%;
-  background: #e5e5ea;
-  color: var(--apple-text);
+  background: #fff8d6;
+  color: #8a6d00;
   font-size: 0.88rem;
   font-weight: 700;
   display: flex;
@@ -1099,7 +1099,7 @@ body {
   flex-shrink: 0;
 }
 .user-avatar.is-admin {
-  background: linear-gradient(135deg, #1d1d1f, #3a3a3c);
+  background: #1d1d1f;
   color: #ffffff;
 }
 .sidebar-user-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
@@ -1120,21 +1120,21 @@ body {
   justify-content: center;
   padding: 7px 10px;
   border-radius: 9px;
-  border: 1.5px solid #1d1d1f;
+  border: 1px solid rgba(0, 0, 0, 0.14);
   background: #ffffff;
   color: #1d1d1f;
   font-size: 0.76rem;
   font-weight: 600;
   cursor: pointer;
-  transition: background 0.15s ease, opacity 0.15s ease;
+  transition: background 0.15s ease, border-color 0.15s ease;
 }
-.user-action-btn:hover { background: #f5f5f7; }
+.user-action-btn:hover { background: #f5f5f7; border-color: rgba(0, 0, 0, 0.24); }
 .user-action-btn.danger {
   background: #ffffff;
   color: var(--apple-red-text);
-  border-color: var(--apple-red-text);
+  border-color: rgba(255, 59, 48, 0.28);
 }
-.user-action-btn.danger:hover { background: #fff5f5; }
+.user-action-btn.danger:hover { background: #fff5f5; border-color: rgba(255, 59, 48, 0.45); }
 
 .modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.35); backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; padding: 20px; z-index: 999; }
 .modal-card { width: 100%; max-width: 400px; display: flex; flex-direction: column; gap: 14px; padding: 24px; box-shadow: var(--apple-shadow-md); }
