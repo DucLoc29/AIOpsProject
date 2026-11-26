@@ -239,9 +239,15 @@ all_scores = final_eif.anomaly_score(X_all_s)
 normal_all_scores = all_scores[y == 0]
 anomaly_all_scores = all_scores[y == 1]
 
-th_high = round(float(np.percentile(normal_all_scores, np.clip(calibrated_quantile, 80.0, 99.5))), 4)
-th_med = round(min(th_high - 0.015, float(np.percentile(normal_all_scores, 92.0))), 4)
-th_crit = round(max(th_high + 0.03, float(np.percentile(anomaly_all_scores, 65.0))), 4)
+th_high = round(float(np.percentile(normal_all_scores, np.clip(calibrated_quantile, 85.0, 99.5))), 4)
+# Nếu có khe hở giữa phân bố Normal và Anomaly, đặt th_high vào giữa khoảng an toàn để vừa chống FP vừa Recall cao
+p99_norm = float(np.percentile(normal_all_scores, 99.0))
+p05_anom = float(np.percentile(anomaly_all_scores, 5.0))
+if p05_anom > p99_norm:
+    th_high = round(float(0.5 * (p99_norm + p05_anom)), 4)
+
+th_med = round(min(th_high - 0.015, float(np.percentile(normal_all_scores, 94.0))), 4)
+th_crit = round(max(th_high + 0.03, float(np.percentile(anomaly_all_scores, 60.0))), 4)
 
 final_eif.threshold_ = th_high
 

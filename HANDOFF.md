@@ -1,8 +1,8 @@
 # HANDOFF – Dự án AIOps (Đồ án tốt nghiệp)
 
-> File này để **teammate hoặc một cửa sổ/agent mới đọc và làm tiếp** mà không cần hỏi lại.
+> File này tổng hợp kiến trúc, quy trình triển khai và kiểm thử để **thành viên nhóm hoặc phiên làm việc mới nắm toàn bộ dự án** mà không cần hỏi lại.
 > Đọc theo thứ tự: mục 1 → 2 → 3 → 4 (đặc biệt đọc kỹ **mục 4** trước khi sửa code). Chi tiết IP: [`docs/network-design.md`](docs/network-design.md).
-> Cập nhật lần cuối: 2026-11-21. Ngôn ngữ làm việc với người dùng: **tiếng Việt**.
+> Cập nhật lần cuối: 2026-11-26. Ngôn ngữ làm việc với người dùng: **tiếng Việt**.
 
 ---
 
@@ -47,7 +47,7 @@
 |---|---|
 | Thư mục dự án | `/home/dash/Desktop/AIOpsProject` (Local) / `~/aiops-project` (Azure VM) |
 | Git Repo | `https://github.com/DucLoc29/AIOpsProject.git` (nhánh `main`) |
-| Cloud Database | **MongoDB Atlas** (`AIOpsProject`: `Services`, `AlertRules`, `AIResults`, `Alerts`, `RemediationActions`) |
+| Cloud Database | **MongoDB Atlas** (`AIOpsProject`: `Services`, `AlertRules` (kèm `rule_system_settings`), `AIResults`, `Alerts`, `RemediationActions`, `Users`) |
 | Giao diện | **AIOps Command Center**: `http://localhost:5000` · **Grafana**: `http://localhost:3000` · **Prometheus**: `http://localhost:9090` |
 
 ### ⚠ Quy trình khởi động sau khi reboot hoặc trên Azure VM
@@ -69,17 +69,44 @@ Build lại Frontend React (nếu có sửa `monitoring/aiops-dashboard/frontend
 
 ---
 
-## 3. Nhiệm vụ Bàn giao cho Teammate: Đăng nhập Phân quyền (RBAC) + ChatOps Telegram & Cảnh báo Leo thang
+## 3. ✅ Tầng Bảo mật RBAC, Quản lý User, Telegram ChatOps, Alertmanager & Cài đặt chung (ĐÃ HOÀN THÀNH)
 
-> **Mục tiêu:** Bổ sung tầng bảo mật vận hành (Authentication + RBAC) và kênh thông báo tương tác **Telegram ChatOps** theo mô hình **Cảnh báo Leo thang Đa tầng (Multi-Tier Alert Escalation Policy)** mà **không làm ảnh hưởng** tới lõi thu thập thật, 2 model AI và cơ chế tự chặn `iptables`.
+> **Trạng thái:** Toàn bộ các hạng mục bảo mật vận hành, quản lý người dùng, Telegram ChatOps + Leo thang đa tầng `L0→L3` + `Auto-Resolved`, nối thông Alertmanager Webhook và trang **Cài đặt chung** đã được triển khai, build sẵn `frontend/dist/` và kiểm thử thực tế thành công mà **không ảnh hưởng** tới lõi thu thập thật, 2 model AI và cơ chế tự chặn `iptables`.
 
-### 3.1. Kiến trúc Module Đề xuất (Tách độc lập, chỉ hook nhẹ vào `app.py`)
-Tạo mới đúng **2 module độc lập** trong `monitoring/aiops-dashboard/backend/`:
-1. **`auth.py`** — Quản lý tài khoản, xác thực phiên & phân quyền RBAC.
-2. **`notifier.py`** — Telegram Bot API (Long Polling) + Inline Buttons phê duyệt trực tiếp + Bộ máy Leo thang `L1 → L2 → L3` + Thông báo `Auto-Resolved`.
+### 3.1. Đăng nhập, Phân quyền RBAC & Quản lý Tài khoản (`auth.py`, `database.py`, `UserPage.jsx`)
+- **Xác thực & Chống tấn công:** Băm mật khẩu `PBKDF2-HMAC-SHA256` + salt ngẫu nhiên, Signed Token `HMAC-SHA256` gắn dấu vân tay mật khẩu (`pfp`) đối chiếu trực tiếp RAM cache `< 0.05ms` (đổi mật khẩu / reset / khóa `LOCKED` / xóa / đổi vai trò có hiệu lực thu hồi tức thời); giới hạn tốc độ chống brute-force (`15` lần sai / `60s` → `429`).
+- **Phân quyền 2 vai trò:**
+  - **`ADMIN`:** Toàn quyền giám sát, điều phối ứng phó (`Auto-Pilot`, `Phê duyệt`, `Bỏ qua`, `Gỡ chặn`), CRUD dịch vụ, Quản lý tài khoản và Cài đặt chung.
+  - **`VIEWER`:** Chỉ xem (`GET /api/state`, `GET /api/database`, `GET /api/services`, `GET /api/auth/me`, tự đổi mật khẩu); mọi API ghi/quản trị đều bị Backend chặn `403 Forbidden`.
+- **Quản lý tài khoản (`#/users`, chỉ `ADMIN`):** Tìm kiếm, lọc vai trò/trạng thái, thêm/sửa/xóa, khóa/mở khóa nhanh, ghi nhận `last_login`, chặn tự khóa/tự xóa/tự hạ quyền và bảo vệ Admin hoạt động cuối cùng. Tài khoản seed mặc định: `admin / admin123` và `viewer / viewer123`.
+- **Tương thích `verify.sh`:** `GET /api/state` cho phép đọc từ `localhost` khi không gửi header `Authorization`, vẫn chặn token giả hoặc truy cập từ ngoài.
 
-Các biến môi trường mới cần khai báo mẫu trong [`.env.example`](.env.example) (và điền giá trị thật ở `.env` cục bộ, **KHÔNG commit `.env`**):
+### 3.2. Telegram ChatOps, Cảnh báo Leo thang `L0→L3` & Auto-Resolved (`notifier.py`, `app.py`, `ResponsePage.jsx`)
+- **Long Polling (`getUpdates?timeout=25`) trên luồng nền riêng (Zero-Crash, Non-Blocking):** Không cần mở port inbound hay SSL/domain (dùng trực tiếp trên iPhone/Android với bot Telegram), mọi request gửi/sửa tin đi qua `queue.Queue` (`timeout=4s`), tuyệt đối không chặn `ENGINE._lock`; nếu `.env` để trống token hệ thống vẫn chạy bình thường.
+- **Tương tác 2 chiều & chống bấm đúp:** Hỗ trợ nút Inline `[✅ Phê duyệt & Chặn ngay]`, `[❌ Bỏ qua]`, `[↩️ Gỡ chặn (Rollback)]` (chỉ chấp nhận `TELEGRAM_ADMIN_IDS` / `TELEGRAM_CHAT_ID` / `TELEGRAM_L2_CHAT_ID`), đồng bộ Web ↔ Telegram bằng `editMessageText` gỡ nút cũ ngay khi xử lý; hỗ trợ lệnh `/status`, `/pending`, `/id`, `/help`.
+- **Chính sách Leo thang 4 tầng + Auto-Resolved:**
+  1. **Tầng 0 (`SUPPRESSED`):** `TransientSpike` → **0 tin nhắn Telegram**.
+  2. **Tầng 1 (`L1`, `t = 0s`):** Báo ngay kèm nút duyệt (`Human-in-the-Loop`) hoặc tự chặn + nút gỡ chặn (`Auto-Pilot`).
+  3. **Tầng 2 (`L2`, mặc định `30s`):** Leo thang khi quá hạn chưa có phản hồi.
+  4. **Tầng 3 (`L3`, mặc định `60s`):** Tự động bảo vệ khẩn cấp (`ESCALATION-L3`) nếu bật tự bảo vệ L3, `fault_class != "Unknown_Anomaly"` và độ tin cậy `>= 80%`. Riêng `Unknown_Anomaly` luôn khóa an toàn, tuyệt đối không tự chặn.
+  5. **Auto-Resolved:** Gửi `🟢 [ĐÃ HỒI PHỤC — NORMAL]` khi dịch vụ từng cảnh báo ổn định `NORMAL` liên tiếp `≥ N` chu kỳ (mặc định `2`).
+
+### 3.3. Nối thông Alertmanager Webhook (`alertmanager.yml` + `POST /alerts`)
+- [`monitoring/alertmanager/alertmanager.yml`](monitoring/alertmanager/alertmanager.yml) đã trỏ về **`http://172.20.20.1:5000/alerts`**.
+- `POST /alerts` nhận trực tiếp từ Alertmanager (không bị chặn bởi auth Web), parse danh sách `firing` / `resolved`, ghi bảng `Alerts` + `RemediationActions` (MongoDB Atlas) và chuyển tiếp cảnh báo hạ tầng cứng (`HostDown`, `WANLinkDown`, `HighCpuUsage`...) ra Telegram (chỉ thông báo, không tự chạy `iptables`).
+
+### 3.4. Trang Cài đặt chung (`#/settings` — `SettingsPage.jsx`, `GET/PUT /api/settings`, `POST /api/settings/reset`)
+- Cho phép `ADMIN` tinh chỉnh nóng không cần khởi động lại server (tự lưu bền vững vào `AlertRules/rule_system_settings` trên MongoDB Atlas và ghi Audit Trail):
+  - Thời gian leo thang `L1→L2`, `L2→L3` (kèm 3 preset nhanh `15s/30s`, `30s/60s`, `120s/300s`), bật/tắt tự bảo vệ L3, độ tin cậy tối thiểu L3, số chu kỳ `Auto-Resolved`.
+  - Chế độ `Auto-Pilot / Human-in-the-Loop`, ngưỡng dự báo 5m kích hoạt Model 2 (`40–90%`), 3 bộ cooldown (`incident`, `dismissed`, `spike_log`) và tần suất làm mới Web (`1s–5s`).
+  - Bật/tắt từng luồng Telegram (AI, Hạ tầng Alertmanager, Hồi phục), cập nhật nóng `Chat ID` / `L2 Chat ID` / `Admin IDs` (không bao giờ lộ `TELEGRAM_BOT_TOKEN`), nút `Gửi tin thử` và nút khôi phục mặc định.
+
+### 3.5. Cấu hình biến môi trường ([`.env.example`](.env.example) → `.env`)
 ```env
+MONGO_URI=mongodb+srv://<username>:<password>@...
+MONGO_DB_NAME=AIOpsProject
+PROMETHEUS_URL=http://localhost:9090
+AIOPS_PORT=5000
 AUTH_SECRET=thay_bang_chuoi_bi_mat_dai_ngau_nhien
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
@@ -88,56 +115,6 @@ TELEGRAM_ADMIN_IDS=
 ESCALATION_L2_SECONDS=30
 ESCALATION_L3_SECONDS=60
 ```
-- **Yêu cầu Zero-Crash:** Nếu `.env` chưa điền `TELEGRAM_BOT_TOKEN` hoặc `TELEGRAM_CHAT_ID`, backend phải tự động bỏ qua kênh Telegram (chỉ in 1 dòng thông báo khi khởi động), tuyệt đối không làm sập server.
-
-### 3.2. Hướng dẫn triển khai Đăng nhập & Phân quyền (`auth.py` + Frontend)
-- **2 vai trò chuẩn NOC/SOC:**
-  - **`ADMIN`:** Toàn quyền xem và thao tác (`POST /api/policy`, `POST /api/approve`, `POST /api/rollback`, CRUD `POST/PUT/DELETE /api/services`).
-  - **`VIEWER`:** Chỉ đọc (`GET /api/state`, `GET /api/database`, `GET /api/services`, `GET /api/auth/me`). Mọi request thay đổi trạng thái từ `VIEWER` phải bị Backend từ chối với **`403 Forbidden`** (không chỉ ẩn nút ở Frontend).
-- **Lưu trữ & Bảo mật (không cần cài thêm thư viện ngoài):**
-  - Thêm collection `Users` vào [`monitoring/aiops-dashboard/backend/database.py`](monitoring/aiops-dashboard/backend/database.py) (seed sẵn 2 tài khoản mặc định khi collection rỗng: `admin` và `viewer`).
-  - Băm mật khẩu bằng `hashlib.pbkdf2_hmac("sha256", ...)` + salt ngẫu nhiên (`secrets.token_hex(16)`).
-  - Cấp phiên đăng nhập bằng **Signed Token (`HMAC-SHA256` ký bằng `AUTH_SECRET`, có thời hạn `exp`)** gửi qua header `Authorization: Bearer <token>` (hoặc Cookie `HttpOnly`).
-  - Ghi rõ trường **`actor`** (vd: `admin (Web)`, `Telegram (@username)`, `Escalation-L3`) vào `audit_logs` và `RemediationActions` để có Audit Trail đầy đủ.
-- **API xác thực thêm vào `app.py`:**
-  - `POST /api/auth/login` → xác thực tài khoản, trả `{token, user: {username, role, full_name}}`.
-  - `POST /api/auth/logout` → đăng xuất phiên.
-  - `GET /api/auth/me` → trả thông tin user hiện tại (hoặc `401` nếu chưa đăng nhập).
-- **Lưu ý quan trọng để không làm hỏng `./scripts/verify.sh`:**
-  - [`scripts/verify.sh`](scripts/verify.sh) dòng 99 gọi `curl -sf -m3 http://127.0.0.1:5000/api/state | grep -q '"model1"'` không kèm token.
-  - Do đó nên giữ `GET /api/state` đọc được từ localhost (hoặc thêm `/api/health` công khai và cập nhật tương ứng trong `scripts/verify.sh`), còn toàn bộ API ghi (`POST/PUT/DELETE`) và thao tác quản trị bắt buộc kiểm tra token + role `ADMIN`.
-- **Frontend (`monitoring/aiops-dashboard/frontend/src/`):**
-  - Thêm trang `LoginPage.jsx` theo cùng phong cách tối giản Apple (`styles.css`); gắn `Authorization: Bearer <token>` trong `api.js` (nếu nhận `401` thì tự chuyển về trang đăng nhập).
-  - Trên `Sidebar.jsx`: hiển thị tên tài khoản + badge vai trò (`ADMIN` / `VIEWER`) + nút **Đăng xuất**.
-  - Với `VIEWER`: ẩn hoặc khóa nút `Phê duyệt`, `Gỡ chặn`, chuyển `Auto-Pilot / Human-in-the-Loop`, và các nút `+ Thêm / Sửa / Xóa dịch vụ`.
-
-### 3.3. Hướng dẫn triển khai Telegram ChatOps & Cảnh báo Leo thang (`notifier.py`)
-- **Bắt buộc dùng Long Polling (`getUpdates`), KHÔNG dùng Webhook:**
-  - Chạy vòng lặp `getUpdates?timeout=25` ở **1 background daemon thread riêng** bằng `urllib.request` (không cần mở port inbound, không cần HTTPS domain/SSL, chạy được ngay trên cả máy Local lẫn Azure VM).
-- **Cơ chế nút bấm Inline (`InlineKeyboardMarkup`) & Chống bấm đúp:**
-  - Khi gửi cảnh báo ở chế độ `Human-in-the-Loop`, đính kèm 2 nút:
-    - `[✅ Phê duyệt & Chặn ngay]` (`callback_data = "approve:<service_id>"`)
-    - `[❌ Bỏ qua]` (`callback_data = "dismiss:<service_id>"`)
-  - Khi đã chặn (Auto-Pilot hoặc sau khi duyệt), đính kèm nút `[↩️ Gỡ chặn (Rollback)]` (`callback_data = "rollback:<service_id>"`).
-  - **Bảo mật ChatOps:** Chỉ xử lý `callback_query` khi `from.id` hoặc `chat.id` nằm trong `TELEGRAM_ADMIN_IDS` / `TELEGRAM_CHAT_ID` / `TELEGRAM_L2_CHAT_ID`.
-  - Ngay khi nhận bấm nút: gọi `answerCallbackQuery`, thực thi `ENGINE.approve_pending(sid)` hoặc `ENGINE.rollback_service_or_all(sid)`, rồi gọi **`editMessageText`** để gỡ bàn phím inline và cập nhật nội dung gốc (vd: *"✅ Đã phê duyệt bởi @username lúc HH:MM:SS"*) nhằm chống bấm đúp. Nếu quản trị viên đã duyệt trên Web trước đó, cập nhật luôn tin nhắn Telegram tương ứng.
-- **Chính sách Cảnh báo Leo thang 4 tầng + Auto-Resolved:**
-  1. **Tầng 0 — Lọc nhiễu (`SUPPRESSED`):** `TransientSpike` (`MEDIUM` + dự báo 5m `NORMAL`) → **TUYỆT ĐỐI KHÔNG gửi Telegram** (chống Alert Fatigue).
-  2. **Tầng 1 (L1 Alert — `t = 0s`):** Khi Model 2 chẩn đoán sự cố (`HIGH`/`CRITICAL`):
-     - `Human-in-the-Loop`: gửi cảnh báo đầy đủ *(Dịch vụ, Mức độ, Nguyên nhân + độ tin cậy, IP nguồn truy vết động, Điểm chặn Firewall/Host, Lệnh `iptables` dự kiến)* kèm nút Phê duyệt / Bỏ qua tới `TELEGRAM_CHAT_ID`.
-     - `Auto-Pilot`: tự chặn ngay và gửi thông báo báo cáo kèm nút `[↩️ Gỡ chặn]`.
-  3. **Tầng 2 (L2 Escalation — sau `ESCALATION_L2_SECONDS`, mặc định demo `30s`):** Nếu sự cố vẫn ở `pending_approvals` (chưa ai duyệt trên Web hay Telegram) và dịch vụ vẫn đang suy giảm → gửi **⚠️ [LEO THANG TẦNG 2 — CHƯA XỬ LÝ]** tới `TELEGRAM_L2_CHAT_ID` (nếu để trống thì gửi vào `TELEGRAM_CHAT_ID` để dễ demo 1 điện thoại).
-  4. **Tầng 3 (L3 Fail-Safe Auto-Mitigation — sau `ESCALATION_L3_SECONDS`, mặc định demo `60s`):**
-     - Nếu quá hạn vẫn chưa có phản hồi, dịch vụ vẫn `HIGH`/`CRITICAL`, `fault_class != "Unknown_Anomaly"` và độ tin cậy `>= 80%` → tự động gọi `ENGINE.approve_pending(sid)` để chặn khẩn cấp cứu dịch vụ, đồng thời gửi **🚨 [LEO THANG TẦNG 3 — ĐÃ TỰ ĐỘNG BẢO VỆ]** kèm nút `[↩️ Gỡ chặn]`.
-     - **Quy tắc an toàn bắt buộc:** Riêng **`Unknown_Anomaly`** (độ tin cậy `< 70%` hoặc dịch vụ sập không có lưu lượng tấn công) thì **KHÔNG BAO GIỜ tự chặn ở Tầng 3**, chỉ gửi cảnh báo leo thang yêu cầu quản trị viên kiểm tra thủ công.
-  5. **Thông báo Hồi phục (`Auto-Resolved`):** Khi dịch vụ từng cảnh báo quay về `NORMAL` ổn định (≥ 2 chu kỳ liên tiếp), gửi 1 tin nhắn gọn **🟢 [ĐÃ HỒI PHỤC]** để đóng vòng đời sự cố.
-  - Có thể hiển thị thêm nhãn tầng leo thang (`L1` / `L2` / `L3`) ngay trên thẻ chờ phê duyệt ở trang [`ResponsePage.jsx`](monitoring/aiops-dashboard/frontend/src/pages/ResponsePage.jsx).
-
-### 3.4. Nối thông Alertmanager Webhook (Tuyến cảnh báo hạ tầng cứng → Web & Telegram)
-- **Vai trò:** Prometheus (`172.20.20.51:9090`) đánh giá 5 luật hạ tầng cứng trong [`monitoring/prometheus/rules/network_alerts.yml`](monitoring/prometheus/rules/network_alerts.yml) (`HostDown`, `WANLinkDown`, `HighPacketRate`, `HighPacketDropRate`, `HighCpuUsage`) và gửi sang Alertmanager (`172.20.20.52:9093`) để gom nhóm, chống lặp và bắn Webhook về Backend `POST /alerts` — bổ trợ cho tuyến AI ở tầng dịch vụ.
-- **2 điểm cần sửa để nối thông thật:**
-  1. Trong [`monitoring/alertmanager/alertmanager.yml`](monitoring/alertmanager/alertmanager.yml) dòng 25, đổi `url: 'http://172.20.20.55:5000/alerts'` thành **`url: 'http://172.20.20.1:5000/alerts'`** (IP gateway mạng OOB `clab` trỏ về máy chủ host đang chạy `app.py`; không còn container `.55`). Lưu ý giữ endpoint `POST /alerts` nhận được từ `172.20.20.52` (không bị chặn bởi auth token của người dùng Web).
-  2. Trong `POST /alerts` của [`monitoring/aiops-dashboard/backend/app.py`](monitoring/aiops-dashboard/backend/app.py), thay vì chỉ lưu tạm vào `ENGINE.alertmanager_webhooks`, hãy parse danh sách `body.get("alerts", [])`, ghi cảnh báo hạ tầng (`firing` / `resolved`) vào `audit_logs` + `Alerts` (MongoDB Atlas) và đẩy tiếp sang `notifier.py` để gửi thông báo hạ tầng (`HostDown`, `WANLinkDown`, `HighCpuUsage`...) ra cùng kênh Telegram (chỉ thông báo, **không** tự chạy `iptables` từ webhook hạ tầng tĩnh).
 
 ---
 
