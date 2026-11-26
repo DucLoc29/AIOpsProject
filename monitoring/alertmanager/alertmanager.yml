@@ -19,9 +19,9 @@ route:
 receivers:
   - name: 'default-receiver'
 
-  # Webhook chuẩn bị cho Auto-Responder (Giai đoạn 5)
+  # Webhook gửi cảnh báo hạ tầng cứng tới AIOps Backend (172.20.20.1 = OOB gateway trỏ về host chạy app.py)
   - name: 'auto-responder-webhook'
     webhook_configs:
-      - url: 'http://172.20.20.55:5000/alerts'
+      - url: 'http://172.20.20.1:5000/alerts'
         send_resolved: true
         max_alerts: 10

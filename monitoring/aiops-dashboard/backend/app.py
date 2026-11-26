@@ -78,6 +78,7 @@ from remediation import (  # noqa: E402
     stop_active_attack_processes,
 )
 from telemetry import RealContainerlabTelemetryCollector  # noqa: E402
+from notifier import TelegramChatOpsNotifier  # noqa: E402
 
 DIST_DIR = FRONTEND_DIR / "dist"
 MODELS_DIR = PROJECT_ROOT / "ai" / "models"
@@ -148,11 +149,21 @@ class AIOpsStateEngine:
         self.service_windows: Dict[str, List[Dict[str, float]]] = {}
         self.service_score_windows: Dict[str, List[float]] = {}
 
-        # Quản lý luật bảo vệ, chờ phê duyệt & cooldown chống ghi log trùng lặp
+        # Quản lý luật bảo vệ, chờ phê duyệt, leo thang & hồi phục (Auto-Resolved)
         self.active_service_rules: Dict[str, Dict[str, Any]] = {}
         self.pending_approvals: Dict[str, Dict[str, Any]] = {}
         self.incident_cooldown: Dict[str, float] = {}
         self.spike_log_cooldown: Dict[str, float] = {}
+        self.dismissed_cooldown: Dict[str, float] = {}
+        self.alerted_services: Dict[str, Dict[str, Any]] = {}
+
+        self.notifier = TelegramChatOpsNotifier(
+            on_approve=self._tg_approve_callback,
+            on_dismiss=self._tg_dismiss_callback,
+            on_rollback=self._tg_rollback_callback,
+            get_status_summary=self._tg_status_summary,
+            get_pending_summary=self._tg_pending_summary,
+        )
 
         self.audit_logs: List[Dict[str, Any]] = list(self.db.remediations_cache) or [
             {
@@ -222,20 +233,22 @@ class AIOpsStateEngine:
                     services_snapshot, sample, lab_up, dp_ready
                 )
 
-                actions_to_run: List[Tuple[Dict[str, Any], Dict[str, Any], str, str, str]] = []
+                actions_to_run: List[Tuple[Dict[str, Any], Dict[str, Any], str, str, str, str]] = []
+                notify_events: List[Tuple[str, Dict[str, Any]]] = []
                 with self._lock:
                     self.lab_running = lab_up
                     self.dataplane_ready = dp_ready
-                    self.latest_state, actions_to_run = self._commit_step_unlocked(
+                    self.latest_state, actions_to_run, notify_events = self._commit_step_unlocked(
                         services_snapshot=services_snapshot,
                         sample=sample,
                         service_evaluations=precomputed,
                         allow_remediation=True,
                     )
 
-                # Thực thi `docker exec iptables` NGOÀI lock để tuyệt đối không làm đứng Web UI!
-                for srv_doc, plan, conf_str, mode, result_id in actions_to_run:
-                    self._run_remediation_async(srv_doc, plan, conf_str, mode, result_id)
+                # Thực thi `docker exec iptables` và đẩy Telegram NGOÀI lock để tuyệt đối không làm đứng Web UI!
+                for srv_doc, plan, conf_str, mode, result_id, actor in actions_to_run:
+                    self._run_remediation_async(srv_doc, plan, conf_str, mode, result_id, actor=actor)
+                self._dispatch_notify_events(notify_events)
             except Exception as exc:
                 print(f"[!] Lỗi vòng lặp thu thập dữ liệu thật: {exc}")
 
@@ -508,16 +521,213 @@ class AIOpsStateEngine:
 
     def _process_realtime_policy_actions_unlocked(
         self, service_evaluations: Dict[str, Dict[str, Any]]
-    ) -> List[Tuple[Dict[str, Any], Dict[str, Any], str, str, str]]:
+    ) -> Tuple[
+        List[Tuple[Dict[str, Any], Dict[str, Any], str, str, str, str]],
+        List[Tuple[str, Dict[str, Any]]],
+    ]:
         """
-        Tự động điều phối ứng phó ngay trong vòng lặp thời gian thực (cho cả nút Web lẫn lệnh từ Terminal).
-        Trả về danh sách hành động `iptables` cần thực thi NGOÀI lock để không chặn HTTP `/api/state`.
+        Tự động điều phối ứng phó + Chính sách Leo thang L1 -> L2 -> L3 + Auto-Resolved.
+        Trả về `(actions_to_run, notify_events)` để thực thi `iptables` & Telegram NGOÀI lock.
         """
         now_ts = time.time()
-        actions_to_run: List[Tuple[Dict[str, Any], Dict[str, Any], str, str, str]] = []
+        actions_to_run: List[Tuple[Dict[str, Any], Dict[str, Any], str, str, str, str]] = []
+        notify_events: List[Tuple[str, Dict[str, Any]]] = []
+
+        # 1) Kiểm tra Leo thang Tầng 2 (L2) và Tầng 3 (L3) cho các sự cố đang chờ phê duyệt
+        for sid, p in list(self.pending_approvals.items()):
+            ev = service_evaluations.get(sid)
+            if not ev:
+                continue
+            sev = ev.get("severity_level", "NORMAL")
+            srv_doc = next((s for s in self.db.services_cache if s["service_id"] == sid), p)
+
+            if sev == "NORMAL":
+                p["normal_streak"] = int(p.get("normal_streak", 0)) + 1
+                if p["normal_streak"] >= 2:
+                    self.pending_approvals.pop(sid, None)
+                    notify_events.append(
+                        (
+                            "sync_pending",
+                            {
+                                "service_id": sid,
+                                "note": f"🟢 Dịch vụ đã tự hồi phục về NORMAL lúc {datetime.now().strftime('%H:%M:%S')}",
+                            },
+                        )
+                    )
+                continue
+
+            p["normal_streak"] = 0
+            if sev not in ("HIGH", "CRITICAL"):
+                continue
+
+            elapsed = now_ts - float(p.get("created_ts", now_ts))
+            p["severity_level"] = sev
+
+            if elapsed >= self.notifier.l2_seconds and not p.get("l2_notified"):
+                p["l2_notified"] = True
+                p["escalation_tier"] = "L2"
+                target_str = f"{srv_doc['service_name']} ({srv_doc['address']}:{srv_doc['port']})"
+                action_str = (
+                    f"[LEO THANG TẦNG 2] Quá {int(elapsed)}s chưa có phản hồi cho {p['fault_class']} "
+                    f"— đã gửi cảnh báo leo thang L2"
+                )
+                self.audit_logs.insert(
+                    0,
+                    {
+                        "time": datetime.now().strftime("%H:%M:%S"),
+                        "service_id": sid,
+                        "scenario": p["fault_class"],
+                        "trigger": "ESCALATION_L2",
+                        "fault_class": p["fault_class"],
+                        "confidence": p["confidence"],
+                        "target": target_str,
+                        "action": action_str,
+                        "status": "ESCALATED",
+                        "actor": "Escalation-L2",
+                    },
+                )
+                self.audit_logs = self.audit_logs[:30]
+                self.db.record_remediation_action(
+                    result_id=p.get("result_id", "escalation_l2"),
+                    service_id=sid,
+                    scenario=p["fault_class"],
+                    trigger_mode="ESCALATION_L2",
+                    fault_class=p["fault_class"],
+                    confidence=p["confidence"],
+                    target_device=target_str,
+                    action_text=action_str,
+                    status="ESCALATED",
+                    actor="Escalation-L2",
+                )
+                notify_events.append(("escalation_l2", {"item": dict(p), "elapsed_s": int(elapsed)}))
+
+            if elapsed >= self.notifier.l3_seconds and not p.get("l3_handled"):
+                p["l3_handled"] = True
+                p["escalation_tier"] = "L3"
+                plan = p.get("remediation") or {}
+                conf_pct = float(p.get("confidence_pct", 0.0))
+                can_auto_protect = (
+                    p.get("fault_class") != "Unknown_Anomaly"
+                    and conf_pct >= 80.0
+                    and bool(plan.get("apply_cmds"))
+                )
+                if can_auto_protect:
+                    self._register_service_rule_unlocked(
+                        service=srv_doc,
+                        plan=plan,
+                        conf_str=p["confidence"],
+                        mode="ESCALATION-L3",
+                        result_id=p.get("result_id", "escalation_l3"),
+                    )
+                    actions_to_run.append(
+                        (
+                            dict(srv_doc),
+                            plan,
+                            p["confidence"],
+                            "ESCALATION-L3",
+                            p.get("result_id", "escalation_l3"),
+                            "Escalation-L3",
+                        )
+                    )
+                    notify_events.append(
+                        (
+                            "sync_pending",
+                            {
+                                "service_id": sid,
+                                "note": f"🚨 Leo thang Tầng 3 ({int(elapsed)}s): Hệ thống đã tự động bảo vệ",
+                            },
+                        )
+                    )
+                else:
+                    # Quy tắc an toàn bắt buộc: Unknown_Anomaly hoặc độ tin cậy < 80% KHÔNG BAO GIỜ tự chặn
+                    target_str = f"{srv_doc['service_name']} ({srv_doc['address']}:{srv_doc['port']})"
+                    action_str = (
+                        f"[LEO THANG TẦNG 3 — THỦ CÔNG] Không tự chặn do độ tin cậy {conf_pct:.1f}% < 80% "
+                        f"hoặc Unknown_Anomaly — yêu cầu quản trị viên kiểm tra!"
+                    )
+                    self.audit_logs.insert(
+                        0,
+                        {
+                            "time": datetime.now().strftime("%H:%M:%S"),
+                            "service_id": sid,
+                            "scenario": p["fault_class"],
+                            "trigger": "ESCALATION_L3_MANUAL",
+                            "fault_class": p["fault_class"],
+                            "confidence": p["confidence"],
+                            "target": target_str,
+                            "action": action_str,
+                            "status": "ALERTED",
+                            "actor": "Escalation-L3",
+                        },
+                    )
+                    self.audit_logs = self.audit_logs[:30]
+                    self.db.record_remediation_action(
+                        result_id=p.get("result_id", "escalation_l3"),
+                        service_id=sid,
+                        scenario=p["fault_class"],
+                        trigger_mode="ESCALATION_L3_MANUAL",
+                        fault_class=p["fault_class"],
+                        confidence=p["confidence"],
+                        target_device=target_str,
+                        action_text=action_str,
+                        status="ALERTED",
+                        actor="Escalation-L3",
+                    )
+                    notify_events.append(
+                        (
+                            "unknown_anomaly",
+                            {
+                                "service": dict(srv_doc),
+                                "severity_level": sev,
+                                "confidence": p["confidence"],
+                                "title": plan.get("title", "Cần kiểm tra thủ công"),
+                                "tier": "L3",
+                            },
+                        )
+                    )
+
+        # 2) Kiểm tra leo thang cảnh báo thủ công cho Unknown_Anomaly (TUYỆT ĐỐI không tự chạy iptables)
+        for sid, info in list(self.alerted_services.items()):
+            if info.get("fault_class") != "Unknown_Anomaly" or sid in self.pending_approvals:
+                continue
+            ev = service_evaluations.get(sid)
+            if not ev or ev.get("severity_level") not in ("HIGH", "CRITICAL"):
+                continue
+            elapsed = now_ts - float(info.get("created_ts", now_ts))
+            if elapsed >= self.notifier.l2_seconds and not info.get("l2_notified"):
+                info["l2_notified"] = True
+                notify_events.append(
+                    (
+                        "unknown_anomaly",
+                        {
+                            "service": info["service"],
+                            "severity_level": ev["severity_level"],
+                            "confidence": info["confidence"],
+                            "title": info["title"],
+                            "tier": "L2",
+                        },
+                    )
+                )
+            elif elapsed >= self.notifier.l3_seconds and not info.get("l3_notified"):
+                info["l3_notified"] = True
+                notify_events.append(
+                    (
+                        "unknown_anomaly",
+                        {
+                            "service": info["service"],
+                            "severity_level": ev["severity_level"],
+                            "confidence": info["confidence"],
+                            "title": info["title"],
+                            "tier": "L3",
+                        },
+                    )
+                )
+
+        # 3) Đánh giá sự cố mới phát sinh ở chu kỳ hiện tại
         for sid, ev in service_evaluations.items():
             srv_doc = next((s for s in self.db.services_cache if s["service_id"] == sid), ev)
 
+            # Tầng 0 (SUPPRESSED): TransientSpike -> CHỈ ghi log, TUYỆT ĐỐI KHÔNG gửi Telegram!
             if ev["severity_level"] == "MEDIUM" and not ev["policy_gate"]["trigger_model3"]:
                 if now_ts - self.spike_log_cooldown.get(sid, 0.0) >= 18.0:
                     self.spike_log_cooldown[sid] = now_ts
@@ -544,6 +754,7 @@ class AIOpsStateEngine:
                         "target": f"{ev['service_name']} ({ev['address']}:{ev['port']})",
                         "action": "Cửa sổ trượt phát hiện dao động thoáng qua & Dự báo 5m tự hồi phục -> Chặn báo động giả!",
                         "status": "SUPPRESSED",
+                        "actor": "AI-Filter",
                     }
                     self.audit_logs.insert(0, entry)
                     self.audit_logs = self.audit_logs[:30]
@@ -557,10 +768,14 @@ class AIOpsStateEngine:
                         target_device=entry["target"],
                         action_text=entry["action"],
                         status="SUPPRESSED",
+                        actor="AI-Filter",
                     )
                 continue
 
             if not ev["policy_gate"]["trigger_model3"]:
+                continue
+
+            if now_ts - self.dismissed_cooldown.get(sid, 0.0) < 45.0:
                 continue
 
             fault_cls = ev["model3"]["fault_class"]
@@ -586,7 +801,8 @@ class AIOpsStateEngine:
                 continue
 
             self.incident_cooldown[sid] = now_ts
-            conf_str = f"{ev['model3']['confidence_pct']:.1f}%"
+            conf_pct = float(ev["model3"]["confidence_pct"])
+            conf_str = f"{conf_pct:.1f}%"
 
             result_id = self.db.record_ai_inference_and_incident(
                 service_id=sid,
@@ -597,10 +813,22 @@ class AIOpsStateEngine:
                 m2_forecast_level=ev["model2"]["forecast_level"],
                 trigger_m3=True,
                 m3_prediction=fault_cls,
-                m3_confidence=ev["model3"]["confidence_pct"],
+                m3_confidence=conf_pct,
                 telemetry_snapshot=ev["metrics"],
                 recommendation=plan["title"],
             )
+
+            self.alerted_services[sid] = {
+                "service": dict(srv_doc),
+                "fault_class": fault_cls,
+                "severity_level": ev["severity_level"],
+                "confidence": conf_str,
+                "title": plan["title"],
+                "created_ts": now_ts,
+                "l2_notified": False,
+                "l3_notified": False,
+                "normal_streak": 0,
+            }
 
             if fault_cls == "Unknown_Anomaly" or not plan.get("apply_cmds"):
                 entry = {
@@ -613,6 +841,7 @@ class AIOpsStateEngine:
                     "target": f"{srv_doc['service_name']} ({srv_doc['address']}:{srv_doc['port']})",
                     "action": plan["title"],
                     "status": "ALERTED",
+                    "actor": "AI-RCA",
                 }
                 self.audit_logs.insert(0, entry)
                 self.audit_logs = self.audit_logs[:30]
@@ -626,6 +855,19 @@ class AIOpsStateEngine:
                     target_device=entry["target"],
                     action_text=entry["action"],
                     status="ALERTED",
+                    actor="AI-RCA",
+                )
+                notify_events.append(
+                    (
+                        "unknown_anomaly",
+                        {
+                            "service": dict(srv_doc),
+                            "severity_level": ev["severity_level"],
+                            "confidence": conf_str,
+                            "title": plan["title"],
+                            "tier": "L1",
+                        },
+                    )
                 )
             elif self.auto_pilot:
                 self._register_service_rule_unlocked(
@@ -635,7 +877,9 @@ class AIOpsStateEngine:
                     mode="AUTO-PILOT",
                     result_id=result_id,
                 )
-                actions_to_run.append((dict(srv_doc), plan, conf_str, "AUTO-PILOT", result_id))
+                actions_to_run.append(
+                    (dict(srv_doc), plan, conf_str, "AUTO-PILOT", result_id, "AUTO-PILOT")
+                )
             else:
                 pending_item = {
                     "result_id": result_id,
@@ -645,6 +889,14 @@ class AIOpsStateEngine:
                     "port": srv_doc["port"],
                     "fault_class": fault_cls,
                     "confidence": conf_str,
+                    "confidence_pct": conf_pct,
+                    "severity_level": ev["severity_level"],
+                    "created_ts": now_ts,
+                    "created_at": datetime.now().strftime("%H:%M:%S"),
+                    "escalation_tier": "L1",
+                    "l2_notified": False,
+                    "l3_handled": False,
+                    "normal_streak": 0,
                     "remediation": plan,
                 }
                 self.pending_approvals[sid] = pending_item
@@ -656,8 +908,9 @@ class AIOpsStateEngine:
                     "fault_class": fault_cls,
                     "confidence": conf_str,
                     "target": f"{srv_doc['service_name']} ({srv_doc['address']}:{srv_doc['port']})",
-                    "action": f"[CHỜ PHÊ DUYỆT] {plan['title']}",
+                    "action": f"[CHỜ PHÊ DUYỆT · L1] {plan['title']}",
                     "status": "PENDING",
+                    "actor": "Escalation-L1",
                 }
                 self.audit_logs.insert(0, entry)
                 self.audit_logs = self.audit_logs[:30]
@@ -671,8 +924,31 @@ class AIOpsStateEngine:
                     target_device=entry["target"],
                     action_text=entry["action"],
                     status="PENDING",
+                    actor="Escalation-L1",
                 )
-        return actions_to_run
+                notify_events.append(("pending_l1", {"item": dict(pending_item)}))
+
+        # 4) Theo dõi Auto-Resolved: khi dịch vụ từng cảnh báo quay về NORMAL ổn định >= 2 chu kỳ liên tiếp
+        for sid, info in list(self.alerted_services.items()):
+            ev = service_evaluations.get(sid)
+            if ev and ev.get("severity_level") == "NORMAL" and sid not in self.pending_approvals:
+                info["normal_streak"] = int(info.get("normal_streak", 0)) + 1
+                if info["normal_streak"] >= 2:
+                    self.alerted_services.pop(sid, None)
+                    notify_events.append(
+                        (
+                            "auto_resolved",
+                            {
+                                "service": info["service"],
+                                "prev_fault": info["fault_class"],
+                                "metrics": dict(ev["metrics"]),
+                            },
+                        )
+                    )
+            else:
+                info["normal_streak"] = 0
+
+        return actions_to_run, notify_events
 
     def _compute_evaluations_no_lock(
         self,
@@ -720,14 +996,19 @@ class AIOpsStateEngine:
         service_evaluations: Dict[str, Dict[str, Any]],
         custom_time: str | None = None,
         allow_remediation: bool = True,
-    ) -> Tuple[Dict[str, Any], List[Tuple[Dict[str, Any], Dict[str, Any], str, str, str]]]:
+    ) -> Tuple[
+        Dict[str, Any],
+        List[Tuple[Dict[str, Any], Dict[str, Any], str, str, str, str]],
+        List[Tuple[str, Dict[str, Any]]],
+    ]:
         self.tick_counter += 1
         now_t = custom_time or datetime.now().strftime("%H:%M:%S")
         _, host_tele, _ = sample
 
-        actions_to_run: List[Tuple[Dict[str, Any], Dict[str, Any], str, str, str]] = []
+        actions_to_run: List[Tuple[Dict[str, Any], Dict[str, Any], str, str, str, str]] = []
+        notify_events: List[Tuple[str, Dict[str, Any]]] = []
         if allow_remediation and custom_time is None and self.lab_running and self.dataplane_ready:
-            actions_to_run = self._process_realtime_policy_actions_unlocked(service_evaluations)
+            actions_to_run, notify_events = self._process_realtime_policy_actions_unlocked(service_evaluations)
 
         services_perf: Dict[str, Dict[str, float]] = {}
         for sid, ev in service_evaluations.items():
@@ -795,9 +1076,10 @@ class AIOpsStateEngine:
                 "pending_approval": first_pending,
             },
             "db_stats": self.db.get_collection_stats(),
+            "telegram": self.notifier.get_status(),
             "audit_logs": self.audit_logs[:15],
         }
-        return state, actions_to_run
+        return state, actions_to_run, notify_events
 
     def _patch_latest_state_unlocked(self) -> Dict[str, Any]:
         """Cập nhật tức thì (< 0.5ms) trạng thái hiển thị sau các thao tác bấm nút mà không gọi docker exec."""
@@ -806,6 +1088,7 @@ class AIOpsStateEngine:
         st = dict(self.latest_state)
         st["audit_logs"] = self.audit_logs[:15]
         st["db_stats"] = self.db.get_collection_stats()
+        st["telegram"] = self.notifier.get_status()
         if isinstance(st.get("policy_gate"), dict):
             pg = dict(st["policy_gate"])
             pg["auto_pilot"] = self.auto_pilot
@@ -850,7 +1133,7 @@ class AIOpsStateEngine:
         services_list = [dict(s) for s in self.db.services_cache]
         sample = prefetched_sample if prefetched_sample is not None else (False, {}, {})
         evals = self._compute_evaluations_no_lock(services_list, sample, self.lab_running, self.dataplane_ready)
-        state, _ = self._commit_step_unlocked(
+        state, _, _ = self._commit_step_unlocked(
             services_snapshot=services_list,
             sample=sample,
             service_evaluations=evals,
@@ -911,6 +1194,33 @@ class AIOpsStateEngine:
             }
         self.active_service_rules[sid] = rule_record
 
+    def _dispatch_notify_events(self, events: List[Tuple[str, Dict[str, Any]]]) -> None:
+        """Đẩy danh sách thông báo sang Telegram notifier NGOÀI `self._lock` (không bao giờ chặn HTTP)."""
+        for kind, payload in events:
+            try:
+                if kind == "pending_l1":
+                    self.notifier.notify_pending_l1(payload["item"])
+                elif kind == "escalation_l2":
+                    self.notifier.notify_escalation_l2(payload["item"], int(payload.get("elapsed_s", 0)))
+                elif kind == "unknown_anomaly":
+                    self.notifier.notify_unknown_anomaly(
+                        service=payload["service"],
+                        severity_level=payload["severity_level"],
+                        confidence=payload["confidence"],
+                        title=payload["title"],
+                        tier=payload.get("tier", "L1"),
+                    )
+                elif kind == "auto_resolved":
+                    self.notifier.notify_auto_resolved(
+                        service=payload["service"],
+                        prev_fault=payload["prev_fault"],
+                        metrics=payload["metrics"],
+                    )
+                elif kind == "sync_pending":
+                    self.notifier.sync_pending_resolved(payload["service_id"], payload["note"])
+            except Exception:
+                pass
+
     def _run_remediation_async(
         self,
         service: Dict[str, Any],
@@ -918,7 +1228,7 @@ class AIOpsStateEngine:
         conf_str: str,
         mode: str,
         result_id: str = "manual",
-        actor: str = "AUTO-PILOT"
+        actor: str = "AUTO-PILOT",
     ) -> None:
         def _worker() -> None:
             sid = service["service_id"]
@@ -956,6 +1266,16 @@ class AIOpsStateEngine:
                 )
                 self._patch_latest_state_unlocked()
 
+            # Gửi báo cáo đã chặn kèm nút Rollback sang Telegram NGOÀI lock
+            self.notifier.notify_remediated(
+                service=service,
+                plan=plan,
+                conf_str=conf_str,
+                mode=mode,
+                actor=actor,
+                exec_status=exec_status,
+            )
+
         threading.Thread(target=_worker, daemon=True).start()
 
     def approve_pending(self, service_id: str | None = None, actor: str = "admin (Web)") -> Dict[str, Any]:
@@ -964,7 +1284,7 @@ class AIOpsStateEngine:
             target_ids = (
                 [service_id]
                 if (service_id and service_id in self.pending_approvals)
-                else list(self.pending_approvals.keys())
+                else ([] if service_id else list(self.pending_approvals.keys()))
             )
             for sid in target_ids:
                 p = self.pending_approvals.get(sid)
@@ -981,8 +1301,65 @@ class AIOpsStateEngine:
                 to_run.append((dict(srv_doc), p["remediation"], p["confidence"], "HUMAN-APPROVED", p.get("result_id", "manual")))
             st = self._patch_latest_state_unlocked()
 
+        now_str = datetime.now().strftime("%H:%M:%S")
         for srv_doc, plan, conf_str, mode, result_id in to_run:
+            self.notifier.sync_pending_resolved(
+                srv_doc["service_id"],
+                f"✅ Đã phê duyệt bởi {actor} lúc {now_str}",
+            )
             self._run_remediation_async(srv_doc, plan, conf_str, mode, result_id, actor=actor)
+        return st
+
+    def dismiss_pending(self, service_id: str | None = None, actor: str = "admin (Web)") -> Dict[str, Any]:
+        dismissed_ids: List[str] = []
+        with self._lock:
+            target_ids = (
+                [service_id]
+                if (service_id and service_id in self.pending_approvals)
+                else ([] if service_id else list(self.pending_approvals.keys()))
+            )
+            now_ts = time.time()
+            for sid in target_ids:
+                p = self.pending_approvals.pop(sid, None)
+                if not p:
+                    continue
+                dismissed_ids.append(sid)
+                self.dismissed_cooldown[sid] = now_ts
+                target_str = f"{p['service_name']} ({p['address']}:{p['port']})"
+                action_str = f"[ĐÃ BỎ QUA] Quản trị viên bỏ qua đề xuất chặn cho {p['fault_class']} (tạm tắt 45s)"
+                self.audit_logs.insert(
+                    0,
+                    {
+                        "time": datetime.now().strftime("%H:%M:%S"),
+                        "service_id": sid,
+                        "scenario": p["fault_class"],
+                        "trigger": "HUMAN_DISMISS",
+                        "fault_class": p["fault_class"],
+                        "confidence": p["confidence"],
+                        "target": target_str,
+                        "action": action_str,
+                        "status": "DISMISSED",
+                        "actor": actor,
+                    },
+                )
+                self.audit_logs = self.audit_logs[:30]
+                self.db.record_remediation_action(
+                    result_id=p.get("result_id", "dismiss"),
+                    service_id=sid,
+                    scenario=p["fault_class"],
+                    trigger_mode="HUMAN_DISMISS",
+                    fault_class=p["fault_class"],
+                    confidence=p["confidence"],
+                    target_device=target_str,
+                    action_text=action_str,
+                    status="DISMISSED",
+                    actor=actor,
+                )
+            st = self._patch_latest_state_unlocked()
+
+        now_str = datetime.now().strftime("%H:%M:%S")
+        for sid in dismissed_ids:
+            self.notifier.sync_pending_resolved(sid, f"❌ Đã bỏ qua bởi {actor} lúc {now_str}")
         return st
 
     def rollback_service_or_all(self, service_id: str | None = None, actor: str = "admin (Web)") -> Dict[str, Any]:
@@ -1023,7 +1400,7 @@ class AIOpsStateEngine:
                     target_device=target_str,
                     action_text=action_str,
                     status="ROLLED_BACK",
-                    actor=actor
+                    actor=actor,
                 )
                 st = self._patch_latest_state_unlocked()
 
@@ -1033,13 +1410,16 @@ class AIOpsStateEngine:
                         stop_active_attack_processes()
 
                 threading.Thread(target=_rb_one, daemon=True).start()
+                self.notifier.sync_rule_rolled_back(service_id, actor)
                 return st
             else:
                 old_rules = list(self.active_service_rules.values())
                 services_snap = [dict(s) for s in self.db.services_cache]
+                pending_ids = list(self.pending_approvals.keys())
                 self.active_service_rules.clear()
                 self.pending_approvals.clear()
                 self.incident_cooldown.clear()
+                self.dismissed_cooldown.clear()
                 action_str = "[ROLLED_BACK (LIVE OOB)] Đã gỡ bỏ toàn bộ các luật chặn iptables tạm thời cho tất cả dịch vụ"
                 self.audit_logs.insert(
                     0,
@@ -1067,7 +1447,7 @@ class AIOpsStateEngine:
                     target_device="All Services & Firewalls",
                     action_text=action_str,
                     status="ROLLED_BACK",
-                    actor=actor
+                    actor=actor,
                 )
                 st = self._patch_latest_state_unlocked()
 
@@ -1076,7 +1456,176 @@ class AIOpsStateEngine:
                     self.collector.reset_accounting_cache()
 
                 threading.Thread(target=_rb_all, daemon=True).start()
+                now_str = datetime.now().strftime("%H:%M:%S")
+                for pid in pending_ids:
+                    self.notifier.sync_pending_resolved(pid, f"↩️ Đã đặt lại toàn bộ bởi {actor} lúc {now_str}")
+                self.notifier.sync_rule_rolled_back(None, actor)
                 return st
+
+    def process_alertmanager_webhook(self, body: Dict[str, Any]) -> int:
+        """
+        Xử lý webhook cảnh báo hạ tầng cứng từ Prometheus/Alertmanager (`POST /alerts`):
+        - Parse danh sách alerts (`firing` / `resolved`), lưu vào `audit_logs` + MongoDB `Alerts`.
+        - Đẩy tiếp sang Telegram (CHỈ thông báo, tuyệt đối không tự chạy `iptables` từ luật tĩnh).
+        """
+        raw_alerts = body.get("alerts")
+        if not isinstance(raw_alerts, list) or not raw_alerts:
+            if isinstance(body, dict) and (body.get("labels") or body.get("alertname")):
+                raw_alerts = [body]
+            else:
+                raw_alerts = []
+
+        parsed_list: List[Dict[str, str]] = []
+        now_time = datetime.now().strftime("%H:%M:%S")
+
+        with self._lock:
+            self.alertmanager_webhooks.insert(0, {"time": now_time, "payload": body})
+            self.alertmanager_webhooks = self.alertmanager_webhooks[:30]
+
+            for item in raw_alerts:
+                if not isinstance(item, dict):
+                    continue
+                labels = item.get("labels") if isinstance(item.get("labels"), dict) else {}
+                ann = item.get("annotations") if isinstance(item.get("annotations"), dict) else {}
+                status = str(item.get("status") or body.get("status") or "firing").lower()
+                alertname = str(labels.get("alertname") or item.get("alertname") or "InfrastructureAlert")
+                instance = str(labels.get("instance") or labels.get("job") or "infrastructure")
+                severity = str(labels.get("severity") or "warning").lower()
+                summary = str(
+                    ann.get("summary")
+                    or ann.get("description")
+                    or f"Cảnh báo hạ tầng {alertname} tại {instance}"
+                )
+
+                self.db.record_infrastructure_alert(
+                    alertname=alertname,
+                    instance=instance,
+                    severity=severity,
+                    status=status,
+                    summary=summary,
+                )
+
+                is_resolved = status == "resolved"
+                log_status = "INFRA_RESOLVED" if is_resolved else "INFRA_ALERT"
+                prefix = "[HẠ TẦNG HỒI PHỤC]" if is_resolved else "[CẢNH BÁO HẠ TẦNG]"
+                action_text = f"{prefix} {alertname} ({severity.upper()}): {summary}"
+                self.audit_logs.insert(
+                    0,
+                    {
+                        "time": now_time,
+                        "service_id": instance,
+                        "scenario": f"Infra:{alertname}",
+                        "trigger": "ALERTMANAGER",
+                        "fault_class": alertname,
+                        "confidence": severity.upper(),
+                        "target": instance,
+                        "action": action_text,
+                        "status": log_status,
+                        "actor": "Alertmanager",
+                    },
+                )
+                self.audit_logs = self.audit_logs[:30]
+                self.db.record_remediation_action(
+                    result_id="alertmanager",
+                    service_id=instance,
+                    scenario=f"Infra:{alertname}",
+                    trigger_mode="ALERTMANAGER",
+                    fault_class=alertname,
+                    confidence=severity.upper(),
+                    target_device=instance,
+                    action_text=action_text,
+                    status=log_status,
+                    actor="Alertmanager",
+                )
+                parsed_list.append(
+                    {
+                        "alertname": alertname,
+                        "instance": instance,
+                        "severity": severity,
+                        "status": status,
+                        "summary": summary,
+                    }
+                )
+            self._patch_latest_state_unlocked()
+
+        for a in parsed_list:
+            self.notifier.notify_infra_alert(
+                alertname=a["alertname"],
+                instance=a["instance"],
+                severity=a["severity"],
+                status=a["status"],
+                summary=a["summary"],
+            )
+        return len(parsed_list)
+
+    # =========================================================================
+    # Telegram ChatOps Callbacks (chạy trên polling thread của notifier.py)
+    # =========================================================================
+    def _tg_approve_callback(self, service_id: str, actor: str) -> Tuple[bool, str]:
+        with self._lock:
+            exists = service_id in self.pending_approvals
+        if not exists:
+            return False, "Sự cố này đã được xử lý hoặc không còn chờ phê duyệt."
+        self.approve_pending(service_id=service_id, actor=actor)
+        return True, f"Đã phê duyệt & thực thi chặn cho {service_id}!"
+
+    def _tg_dismiss_callback(self, service_id: str, actor: str) -> Tuple[bool, str]:
+        with self._lock:
+            exists = service_id in self.pending_approvals
+        if not exists:
+            return False, "Sự cố này không còn trong hàng đợi chờ phê duyệt."
+        self.dismiss_pending(service_id=service_id, actor=actor)
+        return True, f"Đã bỏ qua cảnh báo cho {service_id} (tạm ẩn 45s)."
+
+    def _tg_rollback_callback(self, service_id: str, actor: str) -> Tuple[bool, str]:
+        with self._lock:
+            exists = service_id in self.active_service_rules
+        if not exists:
+            return False, "Dịch vụ này hiện không còn luật chặn nào."
+        self.rollback_service_or_all(service_id=service_id, actor=actor)
+        return True, f"Đã gỡ luật chặn (Rollback) cho {service_id}!"
+
+    def _tg_status_summary(self) -> str:
+        import html as _html
+
+        with self._lock:
+            st = dict(self.latest_state or {})
+            mode_txt = "Tự động (Auto-Pilot)" if self.auto_pilot else "Chờ phê duyệt (Human-in-the-Loop)"
+            evals = dict(st.get("service_evaluations") or {})
+            active_cnt = len(self.active_service_rules)
+            pending_cnt = len(self.pending_approvals)
+
+        icons = {"NORMAL": "🟢", "MEDIUM": "🟡", "HIGH": "🟠", "CRITICAL": "🔴"}
+        lines = [
+            "📊 <b>Trạng thái AIOps Command Center</b>",
+            f"• <b>Chế độ:</b> {_html.escape(mode_txt)}",
+            f"• <b>Luật đang chặn:</b> <code>{active_cnt}</code> · <b>Chờ duyệt:</b> <code>{pending_cnt}</code>",
+        ]
+        for ev in evals.values():
+            sev = ev.get("severity_level", "NORMAL")
+            m = ev.get("metrics") or {}
+            lines.append(
+                f"{icons.get(sev, '⚪')} <b>{_html.escape(str(ev.get('service_name', ev.get('service_id'))))}</b>: "
+                f"<code>{sev}</code> (Lat {float(m.get('latency', 0)):.1f}ms, Loss {float(m.get('packet_loss', 0)):.1f}%)"
+            )
+        lines.append(f"<i>Cập nhật: {datetime.now().strftime('%H:%M:%S')}</i>")
+        return "\n".join(lines)
+
+    def _tg_pending_summary(self) -> str:
+        import html as _html
+
+        with self._lock:
+            items = list(self.pending_approvals.values())
+        if not items:
+            return "✅ Hiện không có sự cố nào đang chờ phê duyệt."
+        lines = ["⏳ <b>Danh sách sự cố đang chờ phê duyệt</b>"]
+        for p in items:
+            lines.append(
+                f"• <b>{_html.escape(str(p.get('service_name')))}</b> — "
+                f"<code>{_html.escape(str(p.get('fault_class')))}</code> "
+                f"({_html.escape(str(p.get('confidence')))}) · Tầng <b>{_html.escape(str(p.get('escalation_tier', 'L1')))}</b>"
+            )
+        return "\n".join(lines)
 
 
 ENGINE = AIOpsStateEngine()
@@ -1287,10 +1836,9 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
             return
         
         elif self.path == "/alerts":
-            ENGINE.alertmanager_webhooks.insert(
-                0, {"time": datetime.now().strftime("%H:%M:%S"), "payload": body}
-            )
-            self._send_json({"status": "ok"})
+            # Nhận webhook hạ tầng từ Alertmanager (172.20.20.52) hoặc localhost (không chặn bởi auth Web)
+            processed = ENGINE.process_alertmanager_webhook(body)
+            self._send_json({"status": "ok", "processed": processed})
             return
 
         # Toàn bộ API ghi bên dưới bắt buộc phải là ADMIN
@@ -1316,9 +1864,20 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
             state = ENGINE.approve_pending(service_id=body.get("service_id"), actor=actor)
             self._send_json(state)
 
+        elif self.path == "/api/dismiss":
+            state = ENGINE.dismiss_pending(service_id=body.get("service_id"), actor=actor)
+            self._send_json(state)
+
         elif self.path == "/api/rollback":
             state = ENGINE.rollback_service_or_all(service_id=body.get("service_id"), actor=actor)
             self._send_json(state)
+
+        elif self.path == "/api/telegram/test":
+            ok, msg = ENGINE.notifier.send_test_message(actor=actor)
+            self._send_json(
+                {"ok": ok, "message": msg, "telegram": ENGINE.notifier.get_status()},
+                status=200 if ok else 400,
+            )
         
         elif self.path.startswith("/api/services"):
             with ENGINE._lock:

@@ -731,6 +731,35 @@ class AIOpsDatabase:
 
         return result_id
 
+    def record_infrastructure_alert(
+        self,
+        alertname: str,
+        instance: str,
+        severity: str,
+        status: str,
+        summary: str,
+    ) -> Dict[str, Any]:
+        """Ghi cảnh báo hạ tầng cứng từ Prometheus/Alertmanager vào bảng Alerts (không chạm AIResults)."""
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        is_resolved = str(status).lower() == "resolved"
+        alert_doc = {
+            "alert_id": f"am_{datetime.now().strftime('%H%M%S_%f')[:11]}",
+            "result_id": "alertmanager",
+            "service_id": str(instance or "INFRASTRUCTURE"),
+            "alert_type": f"Infra:{alertname}",
+            "severity": str(severity or "warning").lower(),
+            "message": f"[Alertmanager · {'RESOLVED' if is_resolved else 'FIRING'}] {summary}",
+            "created_at": now_str,
+            "status": "RESOLVED" if is_resolved else "ACTIVE",
+        }
+        self.alerts_cache.insert(0, alert_doc)
+        self.alerts_cache = self.alerts_cache[:20]
+        self.counts["Alerts"] = self.counts.get("Alerts", 0) + 1
+        if self.connected and self.db is not None:
+            alt_copy = dict(alert_doc)
+            self._run_async(lambda: self.db["Alerts"].insert_one(alt_copy))
+        return alert_doc
+
     def record_remediation_action(
         self,
         result_id: str,

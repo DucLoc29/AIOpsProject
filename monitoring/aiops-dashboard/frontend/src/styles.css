@@ -613,14 +613,18 @@ body {
 
 .badge-status.REMEDIATED,
 .badge-status.ONLINE,
-.badge-status.NORMAL {
+.badge-status.NORMAL,
+.badge-status.RESOLVED,
+.badge-status.INFRA_RESOLVED {
   background: var(--apple-green-soft);
   color: var(--apple-green-text);
 }
 
 .badge-status.SUPPRESSED,
 .badge-status.MEDIUM,
-.badge-status.DEGRADED {
+.badge-status.DEGRADED,
+.badge-status.warning,
+.badge-status.ESCALATED {
   background: var(--apple-orange-soft);
   color: var(--apple-orange-text);
 }
@@ -629,7 +633,10 @@ body {
 .badge-status.HIGH,
 .badge-status.CRITICAL,
 .badge-status.critical,
-.badge-status.high {
+.badge-status.high,
+.badge-status.ACTIVE,
+.badge-status.ALERTED,
+.badge-status.INFRA_ALERT {
   background: var(--apple-red-soft);
   color: var(--apple-red-text);
 }
@@ -639,6 +646,61 @@ body {
   background: var(--apple-blue-soft);
   color: var(--apple-blue);
 }
+
+.badge-status.DISMISSED {
+  background: #f2f2f7;
+  color: var(--apple-text-secondary);
+}
+
+/* Telegram ChatOps & Escalation UI */
+.tg-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.74rem;
+  font-weight: 600;
+  padding: 4px 11px;
+  border-radius: 999px;
+}
+.tg-pill.on { background: var(--apple-green-soft); color: var(--apple-green-text); }
+.tg-pill.off { background: #f2f2f7; color: var(--apple-text-muted); }
+
+.tg-policy-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.tg-policy-strip span {
+  font-size: 0.75rem;
+  color: var(--apple-text-secondary);
+  background: #f5f5f7;
+  border: 1px solid var(--apple-border);
+  padding: 5px 10px;
+  border-radius: 9px;
+}
+.tg-policy-strip strong { color: var(--apple-text); }
+
+.tg-footer-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.pending-badges { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.pending-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.tier-pill {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 999px;
+}
+.tier-pill.tier-L1 { background: var(--apple-blue-soft); color: var(--apple-blue); }
+.tier-pill.tier-L2 { background: var(--apple-orange-soft); color: var(--apple-orange-text); }
+.tier-pill.tier-L3 { background: var(--apple-red-soft); color: var(--apple-red-text); }
 
 /* POLICY BAR */
 .policy-row {
