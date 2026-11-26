@@ -30,7 +30,7 @@ export default function LoginPage({ onLogin }) {
           </div>
           <div>
             <div className="brand-title">AIOps Center</div>
-            <div className="brand-sub">Giám sát bất thường &amp; tự động ứng phó mạng</div>
+            <div className="brand-sub">Giám sát &amp; ứng phó dịch vụ</div>
           </div>
         </div>
 
@@ -75,10 +75,6 @@ export default function LoginPage({ onLogin }) {
         <button type="submit" className="apple-btn active full" disabled={busy}>
           {busy ? 'Đang xác thực...' : 'Đăng nhập'}
         </button>
-
-        <div className="login-foot">
-          Xác thực phiên HMAC-SHA256 · Phân quyền RBAC (ADMIN / VIEWER)
-        </div>
       </form>
     </div>
   );

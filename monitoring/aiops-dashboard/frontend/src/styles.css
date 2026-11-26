@@ -95,10 +95,10 @@ body {
 }
 
 .brand-sub {
-  font-size: 0.75rem;
+  font-size: 0.78rem;
   color: var(--apple-text-muted);
   margin-top: 2px;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
 }
 
 .sidebar-section-label {
@@ -230,16 +230,17 @@ body {
   backdrop-filter: saturate(180%) blur(20px);
   -webkit-backdrop-filter: saturate(180%) blur(20px);
   border-bottom: 1px solid var(--apple-border);
-  padding: 14px 28px;
+  padding: 16px 28px;
   display: flex;
   justify-content: space-between;
   align-items: center;
 }
 
 .page-heading h2 {
-  font-size: 1.3rem;
+  font-size: 1.55rem;
   font-weight: 700;
-  letter-spacing: -0.024em;
+  letter-spacing: -0.025em;
+  line-height: 1.2;
   color: var(--apple-text);
 }
 
