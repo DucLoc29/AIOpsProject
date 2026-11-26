@@ -12,11 +12,12 @@ async function request(path, options = {}) {
   if (token) headers.Authorization = `Bearer ${token}`;
 
   const res = await fetch(path, { ...options, headers });
-
   const data = await res.json().catch(() => ({}));
 
   if (!res.ok) {
-    if (res.status === 401) tokenStore.clear();
+    if (res.status === 401 && path !== '/api/auth/login') {
+      tokenStore.clear();
+    }
     const err = new Error(data.error || `${path} -> ${res.status}`);
     err.status = res.status;
     throw err;
@@ -44,6 +45,8 @@ export const api = {
   login: (username, password) => sendJson('POST', '/api/auth/login', { username, password }),
   logout: () => sendJson('POST', '/api/auth/logout', {}),
   me: () => request('/api/auth/me'),
+  changePassword: (current_password, new_password) =>
+    sendJson('POST', '/api/auth/change-password', { current_password, new_password }),
   getUsers: () => request('/api/users'),
   createUser: (payload) => sendJson('POST', '/api/users', payload),
   updateUser: (username, payload) => sendJson('PUT', `/api/users/${encodeURIComponent(username)}`, payload),

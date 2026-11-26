@@ -922,4 +922,41 @@ body {
 .form-actions { display: flex; justify-content: flex-end; gap: 8px; }
 
 .perf-grid-2x2 { grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); }
+
+/* ===== Auth, RBAC & User Management ===== */
+.apple-btn:disabled { opacity: 0.5; cursor: not-allowed; pointer-events: none; }
+.success-banner { background: var(--apple-green-soft); color: var(--apple-green-text); border: 1px solid rgba(40,205,65,0.3); padding: 10px 14px; border-radius: 12px; font-size: 0.82rem; font-weight: 600; }
+
+.login-shell { display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 24px; background: radial-gradient(circle at top, #ffffff 0%, var(--apple-bg) 72%); }
+.login-card { width: 100%; max-width: 400px; display: flex; flex-direction: column; gap: 15px; padding: 28px; box-shadow: var(--apple-shadow-md); }
+.login-brand { display: flex; align-items: center; gap: 12px; padding-bottom: 10px; border-bottom: 1px solid var(--apple-border); }
+.login-logo { width: 44px; height: 44px; border-radius: 12px; background: #1d1d1f; color: #fff; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.login-foot { text-align: center; font-size: 0.72rem; color: var(--apple-text-muted); padding-top: 4px; }
+
+.pw-wrap { position: relative; display: flex; align-items: center; }
+.pw-wrap .apple-select { width: 100%; padding-right: 54px; }
+.pw-toggle { position: absolute; right: 10px; background: none; border: none; color: var(--apple-blue); font-size: 0.76rem; font-weight: 600; cursor: pointer; padding: 4px 6px; }
+
+.role-pill { display: inline-block; font-size: 0.7rem; font-weight: 700; padding: 3px 9px; border-radius: 999px; letter-spacing: 0.02em; }
+.role-admin { background: var(--apple-blue-soft); color: var(--apple-blue); }
+.role-viewer { background: #f2f2f7; color: var(--apple-text-secondary); }
+
+.status-badge { display: inline-block; font-size: 0.72rem; font-weight: 700; padding: 3px 10px; border-radius: 999px; }
+.st-active { background: var(--apple-green-soft); color: var(--apple-green-text); }
+.st-locked { background: var(--apple-red-soft); color: var(--apple-red-text); }
+
+.user-stats-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+.user-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+.user-search { flex: 1; min-width: 220px; max-width: 340px; }
+
+.sidebar-user-card { display: flex; flex-direction: column; gap: 8px; padding-bottom: 10px; margin-bottom: 2px; border-bottom: 1px solid var(--apple-border); }
+.sidebar-user-head { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
+.sidebar-user-head strong { font-size: 0.84rem; color: var(--apple-text); overflow: hidden; text-overflow: ellipsis; }
+.sidebar-user-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.sidebar-user-actions .apple-btn { padding: 6px 8px; font-size: 0.75rem; text-align: center; }
+
+.modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.35); backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; padding: 20px; z-index: 999; }
+.modal-card { width: 100%; max-width: 400px; display: flex; flex-direction: column; gap: 14px; padding: 24px; box-shadow: var(--apple-shadow-md); }
+
+@media (max-width: 1100px) { .user-stats-4 { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 900px) { .summary-3 { grid-template-columns: 1fr; } .event-list li { grid-template-columns: 1fr; } }

@@ -28,6 +28,7 @@ import os
 import sys
 import threading
 import time
+import urllib.parse
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -55,8 +56,12 @@ from prepare_two_stage_datasets import (  # noqa: E402
 )
 from database import AIOpsDatabase  # noqa: E402
 from auth import (  # noqa: E402
+    check_login_rate_limit,
+    clear_login_failures,
     create_token,
     extract_bearer_token,
+    password_fingerprint,
+    record_login_failure,
     revoke_token,
     verify_password,
     verify_token,
@@ -1103,19 +1108,38 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
         return self.client_address[0] in ("127.0.0.1", "::1")
 
     def _require_auth(self, admin_only: bool = False) -> Dict[str, Any] | None:
-        """Xác thực Bearer Token; nếu admin_only=True thì chỉ cho phép role ADMIN."""
+        """
+        Xác thực Bearer Token kết hợp đối chiếu trực tiếp RAM cache `Users` (< 0.05ms):
+        - Tài khoản bị xóa / đổi mật khẩu / bị khóa (LOCKED) bị chặn ngay lập tức.
+        - Vai trò (role) và họ tên (full_name) luôn phản ánh trạng thái mới nhất.
+        """
         token = extract_bearer_token(self.headers)
-        user = verify_token(token) if token else None
-        
-        if not user:
+        payload = verify_token(token) if token else None
+        if not payload:
             self._send_json({"error": "Chưa đăng nhập hoặc phiên đã hết hạn"}, status=401)
             return None
-        
-        if admin_only and user.get("role") != "ADMIN":
+
+        live_doc = ENGINE.db.get_user_by_username(payload.get("username", ""))
+        if not live_doc:
+            self._send_json({"error": "Tài khoản không còn tồn tại"}, status=401)
+            return None
+
+        token_pfp = str(payload.get("pfp", ""))
+        live_pfp = password_fingerprint(str(live_doc.get("password_hash", "")))
+        if token_pfp and live_pfp and token_pfp != live_pfp:
+            self._send_json({"error": "Mật khẩu đã thay đổi, vui lòng đăng nhập lại"}, status=401)
+            return None
+
+        if str(live_doc.get("status", "ACTIVE")).upper() == "LOCKED":
+            self._send_json({"error": "Tài khoản đã bị khóa bởi quản trị viên"}, status=403)
+            return None
+
+        live_user = ENGINE.db._public_user(live_doc)
+        if admin_only and live_user["role"] != "ADMIN":
             self._send_json({"error": "Chỉ ADMIN mới có quyền thao tác"}, status=403)
             return None
-        
-        return user
+
+        return live_user
 
     def _send_file(self, file_path: Path) -> None:
         if not file_path.exists() or not file_path.is_file():
@@ -1157,9 +1181,11 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
             self._send_json({"user": user})
 
         elif self.path.startswith("/api/state"):
-            if not self._is_local_request() and not self._require_auth():
-                return
-            self._send_json(ENGINE.get_latest_state())          
+            has_bearer = bool(extract_bearer_token(self.headers))
+            if has_bearer or not self._is_local_request():
+                if not self._require_auth():
+                    return
+            self._send_json(ENGINE.get_latest_state())
 
         elif self.path.startswith("/api/database"):
 
@@ -1204,35 +1230,60 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
         body = self._read_json_body()
 
         if self.path == "/api/auth/login":
+            client_ip = self.client_address[0]
+            allowed, retry_after = check_login_rate_limit(client_ip)
+            if not allowed:
+                self._send_json(
+                    {"error": f"Thử đăng nhập sai quá nhiều lần. Vui lòng thử lại sau {retry_after}s"},
+                    status=429,
+                )
+                return
+
             username = str(body.get("username", "")).strip()
             password = str(body.get("password", ""))
             user_doc = ENGINE.db.get_user_by_username(username)
 
             if not user_doc or not verify_password(password, user_doc.get("password_hash", "")):
+                record_login_failure(client_ip)
                 self._send_json({"error": "Sai tên đăng nhập hoặc mật khẩu"}, status=401)
                 return
-            
-            token = create_token({
-                'username': user_doc["username"],
-                'role': user_doc["role"],
-                'full_name': user_doc.get("full_name", ""),
-            })
 
-            self._send_json({
-                "token": token,
-                "user": {
-                    "username": user_doc["username"],
-                    "role": user_doc["role"],
-                    "full_name": user_doc.get("full_name", ""),
-                },
-            })
+            if str(user_doc.get("status", "ACTIVE")).upper() == "LOCKED":
+                self._send_json({"error": "Tài khoản đã bị khóa bởi quản trị viên"}, status=403)
+                return
+
+            clear_login_failures(client_ip)
+            with ENGINE._lock:
+                ENGINE.db.record_user_login(user_doc["username"])
+                pub_user = ENGINE.db._public_user(user_doc)
+                token = create_token(user_doc)
+
+            self._send_json({"token": token, "user": pub_user})
             return
-        
+
         elif self.path == "/api/auth/logout":
             token = extract_bearer_token(self.headers)
             if token:
                 revoke_token(token)
             self._send_json({"status": "ok"})
+            return
+
+        elif self.path == "/api/auth/change-password":
+            user = self._require_auth(admin_only=False)
+            if not user:
+                return
+            cur_pwd = str(body.get("current_password", ""))
+            new_pwd = str(body.get("new_password", ""))
+            with ENGINE._lock:
+                updated_doc, err = ENGINE.db.change_own_password(user["username"], cur_pwd, new_pwd)
+            if err or not updated_doc:
+                self._send_json({"error": err or "Không thể đổi mật khẩu"}, status=400)
+                return
+            old_token = extract_bearer_token(self.headers)
+            if old_token:
+                revoke_token(old_token)
+            new_token = create_token(updated_doc)
+            self._send_json({"token": new_token, "user": ENGINE.db._public_user(updated_doc)})
             return
         
         elif self.path == "/alerts":
@@ -1316,17 +1367,18 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(state)
 
         elif self.path.startswith("/api/users"):
-            if not self._require_auth(admin_only=True):
+            user = self._require_auth(admin_only=True)
+            if not user:
                 return
             parts = self.path.split("?", 1)[0].rstrip("/").split("/")
-            uname = parts[3] if len(parts) > 3 else str(body.get("username", ""))
+            uname = urllib.parse.unquote(parts[3]) if len(parts) > 3 else str(body.get("username", ""))
             with ENGINE._lock:
-                updated, err = ENGINE.db.update_user(uname, body)
+                updated, err = ENGINE.db.update_user(uname, body, current_username=user["username"])
                 users = ENGINE.db.list_users()
             if err:
                 self._send_json({"error": err}, status=400)
                 return
-            self._send_json({"user": updated, "Users": users})        
+            self._send_json({"user": updated, "Users": users})
 
         else:
             self.send_error(404, "Unknown API endpoint")
@@ -1354,14 +1406,14 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
             if not user:
                 return
             parts = self.path.split("?", 1)[0].rstrip("/").split("/")
-            uname = parts[3] if len(parts) > 3 else str(body.get("username", ""))
+            uname = urllib.parse.unquote(parts[3]) if len(parts) > 3 else str(body.get("username", ""))
             with ENGINE._lock:
                 ok, err = ENGINE.db.delete_user(uname, current_username=user["username"])
                 users = ENGINE.db.list_users()
             if not ok:
                 self._send_json({"error": err}, status=400)
                 return
-            self._send_json({"status": "ok", "Users": users})        
+            self._send_json({"status": "ok", "Users": users})
         
         else:
             self.send_error(404, "Unknown API endpoint")

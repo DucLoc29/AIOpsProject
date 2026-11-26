@@ -35,12 +35,13 @@ export default function ResponsePage({ ctx }) {
       <div className="apple-card">
         <div className="card-title-row">
           <h3>Chế độ xử lý</h3>
-          {
-            isAdmin &&  (
+          {isAdmin ? (
             <button className="apple-btn secondary" onClick={() => rollback()}>
               Gỡ chặn tất cả dịch vụ
-            </button>)
-          }
+            </button>
+          ) : (
+            <span className="role-pill role-viewer">Chế độ chỉ đọc (VIEWER)</span>
+          )}
         </div>
         <div className="mode-row">
           <button

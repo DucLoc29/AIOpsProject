@@ -1,23 +1,46 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, tokenStore } from './api.js';
 
-/** Polling state + database snapshot từ Backend (2s/lần) và các hành động điều khiển + CRUD Services. */
+/** Polling state + database snapshot từ Backend (2s/lần), quản lý phiên đăng nhập RBAC & CRUD. */
 export function useAIOps(intervalMs = 2000) {
   const [state, setState] = useState(null);
   const [db, setDb] = useState(null);
   const [error, setError] = useState(null);
-
   const [user, setUser] = useState(null);
-  // setting up auth
   const [authReady, setAuthReady] = useState(false);
 
-  // Kiểm tra token sẵn có trong localStorage khi mới tải trang
+  const forceLogout = useCallback(() => {
+    tokenStore.clear();
+    setUser(null);
+    setState(null);
+    setDb(null);
+  }, []);
+
+  const refreshMe = useCallback(async () => {
+    if (!tokenStore.get()) {
+      setUser(null);
+      return null;
+    }
+    try {
+      const res = await api.me();
+      setUser(res.user || null);
+      return res.user || null;
+    } catch (e) {
+      if (e.status === 401 || e.status === 403) {
+        forceLogout();
+      }
+      return null;
+    }
+  }, [forceLogout]);
+
+  // Kiểm tra token sẵn có trong localStorage khi tải trang
   useEffect(() => {
     if (!tokenStore.get()) {
       setAuthReady(true);
       return;
     }
-    api.me()
+    api
+      .me()
       .then((res) => setUser(res.user || null))
       .catch(() => {
         tokenStore.clear();
@@ -25,7 +48,6 @@ export function useAIOps(intervalMs = 2000) {
       })
       .finally(() => setAuthReady(true));
   }, []);
-
 
   const refresh = useCallback(async () => {
     try {
@@ -35,22 +57,20 @@ export function useAIOps(intervalMs = 2000) {
       setError(null);
     } catch (e) {
       if (e.status === 401) {
-        setUser(null);
-        setState(null);
+        forceLogout();
       } else {
         setError(e.message);
       }
     }
-  }, []);
+  }, [forceLogout]);
 
-// Chỉ polling khi đã có user
+  // Chỉ polling khi đã xác thực thành công
   useEffect(() => {
     if (!user) return undefined;
     refresh();
     const t = setInterval(refresh, intervalMs);
     return () => clearInterval(t);
   }, [user, refresh, intervalMs]);
-
 
   const login = useCallback(async (username, password) => {
     const res = await api.login(username, password);
@@ -63,12 +83,16 @@ export function useAIOps(intervalMs = 2000) {
     try {
       await api.logout();
     } catch (_) {
-      // Bỏ qua lỗi mạng khi logout
+      // Bỏ qua lỗi mạng khi đăng xuất
     }
-    tokenStore.clear();
-    setUser(null);
-    setState(null);
-    setDb(null);
+    forceLogout();
+  }, [forceLogout]);
+
+  const changePassword = useCallback(async (currentPassword, newPassword) => {
+    const res = await api.changePassword(currentPassword, newPassword);
+    if (res.token) tokenStore.set(res.token);
+    if (res.user) setUser(res.user);
+    return res;
   }, []);
 
   const act = useCallback(
@@ -76,30 +100,34 @@ export function useAIOps(intervalMs = 2000) {
       try {
         setState(await fn());
         setDb(await api.getDatabase());
+        setError(null);
       } catch (e) {
-        if (e.status === 401) { 
-          setUser(null); 
-          return; 
+        if (e.status === 401) {
+          forceLogout();
+          return;
         }
         setError(e.message);
       }
     },
-    []
+    [forceLogout]
   );
 
   return {
     state,
     db,
     error,
+    user,
+    authReady,
+    login,
+    logout,
+    forceLogout,
+    refreshMe,
+    changePassword,
     setPolicy: (payload) => act(() => api.setPolicy(payload)),
     approve: (service_id) => act(() => api.approve(service_id)),
     rollback: (service_id) => act(() => api.rollback(service_id)),
     createService: (payload) => act(() => api.createService(payload)),
     updateService: (service_id, payload) => act(() => api.updateService(service_id, payload)),
     deleteService: (service_id) => act(() => api.deleteService(service_id)),
-    user,
-    authReady,
-    login,
-    logout,
   };
 }

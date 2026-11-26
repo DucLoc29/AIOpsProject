@@ -3,12 +3,13 @@
 Tầng Cơ sở dữ liệu MongoDB Atlas (Cloud Database) cho AIOps Command Center.
 Hỗ trợ đầy đủ CRUD (Thêm / Sửa / Xóa) cho bảng `Services` đồng bộ trực tiếp lên MongoDB Atlas.
 
-Quản lý 5 Bảng (Collections) chuẩn trong database `AIOpsProject`:
+Quản lý 6 Bảng (Collections) chuẩn trong database `AIOpsProject`:
   1. `Services`           : Danh mục các Dịch vụ ứng dụng doanh nghiệp (Hỗ trợ CRUD Thêm / Sửa / Xóa động)
   2. `AlertRules`         : Cấu hình luật cảnh báo & ngưỡng điều phối hệ thống AI (Policy Gate)
   3. `AIResults`          : Kết quả suy luận AI (Model 1 4-mức -> Dự báo 5m 4-mức -> Model 2 RCA) theo từng Service
   4. `Alerts`             : Cảnh báo sự cố chính thức của từng Service
   5. `RemediationActions` : Nhật ký câu lệnh tự động ứng phó khép kín theo IP:Port & Rollback từng dịch vụ
+  6. `Users`              : Tài khoản đăng nhập & phân quyền RBAC (`ADMIN` / `VIEWER`, trạng thái `ACTIVE` / `LOCKED`)
 """
 
 import os
@@ -18,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from auth import hash_password
+from auth import hash_password, verify_password
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 ENV_FILE = PROJECT_ROOT / ".env"
@@ -157,23 +158,30 @@ IP_TO_OOB = {
 
 def build_default_users() -> List[Dict[str, Any]]:
     """Tạo 2 tài khoản mặc định (admin / viewer) với mật khẩu đã băm PBKDF2-SHA256."""
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return [
         {
             "username": "admin",
             "password_hash": hash_password("admin123"),
             "role": "ADMIN",
             "full_name": "Quản trị viên NOC/SOC",
+            "status": "ACTIVE",
+            "created_at": now_str,
+            "last_login": "-",
         },
         {
             "username": "viewer",
             "password_hash": hash_password("viewer123"),
             "role": "VIEWER",
             "full_name": "Giám sát viên (Chỉ đọc)",
+            "status": "ACTIVE",
+            "created_at": now_str,
+            "last_login": "-",
         },
     ]
 
 class AIOpsDatabase:
-    """Quản lý kết nối MongoDB Atlas (5 bảng) kèm CRUD Services & bộ nhớ đệm an toàn."""
+    """Quản lý kết nối MongoDB Atlas (6 bảng) kèm CRUD Services & Users + bộ nhớ đệm an toàn."""
 
     def __init__(self) -> None:
         load_env_file()
@@ -419,6 +427,10 @@ class AIOpsDatabase:
             
             db_users = list(self.db["Users"].find({}, {"_id": 0}))
             if db_users:
+                for u in db_users:
+                    u.setdefault("status", "ACTIVE")
+                    u.setdefault("created_at", "-")
+                    u.setdefault("last_login", "-")
                 self.users_cache = db_users
 
             self.counts = {
@@ -443,16 +455,41 @@ class AIOpsDatabase:
     # CRUD Users
     @staticmethod
     def _public_user(user: Dict[str, Any]) -> Dict[str, Any]:
-        """Trả về thông tin user (ko có password_hash)."""
+        """Trả về thông tin user an toàn (không bao giờ trả password_hash)."""
         return {
             "username": user.get("username", ""),
-            "role": user.get("role", "VIEWER"),
+            "role": str(user.get("role", "VIEWER")).upper(),
             "full_name": user.get("full_name", ""),
+            "status": str(user.get("status", "ACTIVE")).upper(),
+            "created_at": user.get("created_at", "-"),
+            "last_login": user.get("last_login", "-"),
         }
+
+    def _active_admin_count(self) -> int:
+        return sum(
+            1
+            for u in self.users_cache
+            if str(u.get("role", "")).upper() == "ADMIN"
+            and str(u.get("status", "ACTIVE")).upper() == "ACTIVE"
+        )
 
     def list_users(self) -> List[Dict[str, Any]]:
         """Lấy danh sách toàn bộ tài khoản (không kèm mật khẩu băm)."""
         return [self._public_user(u) for u in self.users_cache]
+
+    def record_user_login(self, username: str) -> None:
+        target = self.get_user_by_username(username)
+        if target is None:
+            return
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        target["last_login"] = now_str
+        uname = target["username"]
+        if self.connected and self.db is not None:
+            self._run_async(
+                lambda: self.db["Users"].update_one(
+                    {"username": uname}, {"$set": {"last_login": now_str}}
+                )
+            )
 
     def create_user(
         self, payload: Dict[str, Any]
@@ -460,6 +497,7 @@ class AIOpsDatabase:
         uname = str(payload.get("username", "")).strip().lower()
         password = str(payload.get("password", ""))
         role = str(payload.get("role", "VIEWER")).strip().upper()
+        status = str(payload.get("status", "ACTIVE")).strip().upper()
         full_name = str(payload.get("full_name", "")).strip() or uname
 
         if not uname or not re.match(r"^[a-z0-9_.-]{3,32}$", uname):
@@ -468,14 +506,20 @@ class AIOpsDatabase:
             return None, "Mật khẩu phải có ít nhất 4 ký tự"
         if role not in ("ADMIN", "VIEWER"):
             return None, "Vai trò chỉ chấp nhận ADMIN hoặc VIEWER"
+        if status not in ("ACTIVE", "LOCKED"):
+            return None, "Trạng thái chỉ chấp nhận ACTIVE hoặc LOCKED"
         if self.get_user_by_username(uname) is not None:
             return None, f"Tài khoản '{uname}' đã tồn tại"
 
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         new_doc: Dict[str, Any] = {
             "username": uname,
             "password_hash": hash_password(password),
             "role": role,
             "full_name": full_name,
+            "status": status,
+            "created_at": now_str,
+            "last_login": "-",
         }
         self.users_cache.append(dict(new_doc))
         self.counts["Users"] = len(self.users_cache)
@@ -490,26 +534,40 @@ class AIOpsDatabase:
         return self._public_user(new_doc), None
 
     def update_user(
-        self, username: str, payload: Dict[str, Any]
+        self, username: str, payload: Dict[str, Any], current_username: str = ""
     ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         target = self.get_user_by_username(username)
         if target is None:
             return None, f"Không tìm thấy tài khoản '{username}'"
 
         uname = target["username"]
-        new_role = str(payload.get("role", target["role"])).strip().upper()
+        cur_uname = str(current_username or "").strip().lower()
+        old_role = str(target.get("role", "VIEWER")).upper()
+        old_status = str(target.get("status", "ACTIVE")).upper()
+        new_role = str(payload.get("role", old_role)).strip().upper()
+        new_status = str(payload.get("status", old_status)).strip().upper()
+
         if new_role not in ("ADMIN", "VIEWER"):
             return None, "Vai trò chỉ chấp nhận ADMIN hoặc VIEWER"
+        if new_status not in ("ACTIVE", "LOCKED"):
+            return None, "Trạng thái chỉ chấp nhận ACTIVE hoặc LOCKED"
 
-        # Chặn hạ quyền nếu đây là ADMIN cuối cùng trong hệ thống
-        if target.get("role") == "ADMIN" and new_role != "ADMIN":
-            admin_count = sum(1 for u in self.users_cache if u.get("role") == "ADMIN")
-            if admin_count <= 1:
-                return None, "Phải giữ ít nhất 1 tài khoản ADMIN trong hệ thống"
+        if cur_uname and uname == cur_uname:
+            if new_role != "ADMIN" and old_role == "ADMIN":
+                return None, "Không thể tự hạ quyền tài khoản đang đăng nhập"
+            if new_status == "LOCKED":
+                return None, "Không thể tự khóa tài khoản đang đăng nhập"
+
+        # Chặn hạ quyền hoặc khóa nếu đây là ADMIN đang hoạt động cuối cùng
+        was_active_admin = old_role == "ADMIN" and old_status == "ACTIVE"
+        will_be_active_admin = new_role == "ADMIN" and new_status == "ACTIVE"
+        if was_active_admin and not will_be_active_admin and self._active_admin_count() <= 1:
+            return None, "Phải giữ ít nhất 1 tài khoản ADMIN đang hoạt động trong hệ thống"
 
         updates: Dict[str, Any] = {
             "role": new_role,
-            "full_name": str(payload.get("full_name", target.get("full_name", ""))).strip(),
+            "status": new_status,
+            "full_name": str(payload.get("full_name", target.get("full_name", ""))).strip() or uname,
         }
         new_password = str(payload.get("password", ""))
         if new_password:
@@ -525,6 +583,30 @@ class AIOpsDatabase:
             )
         return self._public_user(target), None
 
+    def change_own_password(
+        self, username: str, current_password: str, new_password: str
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        target = self.get_user_by_username(username)
+        if target is None:
+            return None, "Không tìm thấy tài khoản"
+        if not verify_password(current_password, str(target.get("password_hash", ""))):
+            return None, "Mật khẩu hiện tại không đúng"
+        if len(new_password) < 4:
+            return None, "Mật khẩu mới phải có ít nhất 4 ký tự"
+        if new_password == current_password:
+            return None, "Mật khẩu mới phải khác mật khẩu hiện tại"
+
+        new_hash = hash_password(new_password)
+        target["password_hash"] = new_hash
+        uname = target["username"]
+        if self.connected and self.db is not None:
+            self._run_async(
+                lambda: self.db["Users"].update_one(
+                    {"username": uname}, {"$set": {"password_hash": new_hash}}
+                )
+            )
+        return dict(target), None
+
     def delete_user(
         self, username: str, current_username: str = ""
     ) -> Tuple[bool, Optional[str]]:
@@ -536,10 +618,12 @@ class AIOpsDatabase:
         if current_username and uname == current_username.strip().lower():
             return False, "Không thể tự xóa tài khoản đang đăng nhập"
 
-        if target.get("role") == "ADMIN":
-            admin_count = sum(1 for u in self.users_cache if u.get("role") == "ADMIN")
-            if admin_count <= 1:
-                return False, "Phải giữ ít nhất 1 tài khoản ADMIN trong hệ thống"
+        if (
+            str(target.get("role", "")).upper() == "ADMIN"
+            and str(target.get("status", "ACTIVE")).upper() == "ACTIVE"
+            and self._active_admin_count() <= 1
+        ):
+            return False, "Phải giữ ít nhất 1 tài khoản ADMIN đang hoạt động trong hệ thống"
 
         self.users_cache = [u for u in self.users_cache if u["username"] != uname]
         self.counts["Users"] = len(self.users_cache)

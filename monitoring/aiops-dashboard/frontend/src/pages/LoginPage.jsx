@@ -1,8 +1,10 @@
 import React, { useState } from 'react';
+import Icon from '../components/Icon.jsx';
 
 export default function LoginPage({ onLogin }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [showPw, setShowPw] = useState(false);
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -10,7 +12,6 @@ export default function LoginPage({ onLogin }) {
     e.preventDefault();
     setErr('');
     setBusy(true);
-    
     try {
       await onLogin(username.trim(), password);
     } catch (ex) {
@@ -21,15 +22,16 @@ export default function LoginPage({ onLogin }) {
   };
 
   return (
-    <div className="boot-screen">
-      <form
-        className="apple-card"
-        onSubmit={handleSubmit}
-        style={{ width: '100%', maxWidth: 380, display: 'flex', flexDirection: 'column', gap: 14 }}
-      >
-        <div>
-          <div className="brand-title">AIOps Center</div>
-          <div className="brand-sub">Đăng nhập hệ thống giám sát &amp; ứng phó</div>
+    <div className="login-shell">
+      <form className="apple-card login-card" onSubmit={handleSubmit}>
+        <div className="login-brand">
+          <div className="login-logo">
+            <Icon name="shield" size={24} />
+          </div>
+          <div>
+            <div className="brand-title">AIOps Center</div>
+            <div className="brand-sub">Giám sát bất thường &amp; tự động ứng phó mạng</div>
+          </div>
         </div>
 
         {err && <div className="error-banner">{err}</div>}
@@ -40,7 +42,8 @@ export default function LoginPage({ onLogin }) {
             className="apple-select"
             required
             autoFocus
-            placeholder="admin hoặc viewer"
+            autoComplete="username"
+            placeholder="Nhập tên tài khoản"
             value={username}
             onChange={(e) => setUsername(e.target.value)}
           />
@@ -48,19 +51,34 @@ export default function LoginPage({ onLogin }) {
 
         <label className="policy-field">
           <span>Mật khẩu</span>
-          <input
-            type="password"
-            className="apple-select"
-            required
-            placeholder="Nhập mật khẩu"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-          />
+          <div className="pw-wrap">
+            <input
+              type={showPw ? 'text' : 'password'}
+              className="apple-select"
+              required
+              autoComplete="current-password"
+              placeholder="Nhập mật khẩu"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+            <button
+              type="button"
+              className="pw-toggle"
+              onClick={() => setShowPw((v) => !v)}
+              tabIndex={-1}
+            >
+              {showPw ? 'Ẩn' : 'Hiện'}
+            </button>
+          </div>
         </label>
 
         <button type="submit" className="apple-btn active full" disabled={busy}>
           {busy ? 'Đang xác thực...' : 'Đăng nhập'}
         </button>
+
+        <div className="login-foot">
+          Xác thực phiên HMAC-SHA256 · Phân quyền RBAC (ADMIN / VIEWER)
+        </div>
       </form>
     </div>
   );

@@ -6,18 +6,15 @@ export const NAV_ITEMS = [
   { id: 'service-detail', label: 'Chi tiết dịch vụ', icon: 'chart' },
   { id: 'response', label: 'Ứng phó & Cảnh báo', icon: 'shield' },
   { id: 'services', label: 'Quản lý dịch vụ', icon: 'server' },
-  { id: 'users', label: 'Quản lý tài khoản', icon: 'users', adminOnly: true }
+  { id: 'users', label: 'Quản lý tài khoản', icon: 'users', adminOnly: true },
 ];
 
-export default function Sidebar({ view, onChange, state, user, onLogout }) {
+export default function Sidebar({ view, onChange, state, user, onLogout, onOpenChangePassword }) {
   const hostIp = window.location.hostname || 'localhost';
   const net = state?.network_state || {};
   const alertCount = (net.active_service_rules?.length || 0) + (net.pending_approvals?.length || 0);
 
-  //lọc danh sách menu theo quyền: Nếu là admin (2nd: True) hiện 5 item, là viewer(1st: 4 items; 2nd: false)
-  const visibleItems = NAV_ITEMS.filter(
-    (item) => !item.adminOnly || user?.role === 'ADMIN'
-  );
+  const visibleItems = NAV_ITEMS.filter((item) => !item.adminOnly || user?.role === 'ADMIN');
 
   return (
     <aside className="apple-sidebar">
@@ -55,15 +52,27 @@ export default function Sidebar({ view, onChange, state, user, onLogout }) {
       </div>
 
       <div className="sidebar-footer">
-
         {user && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, paddingBottom: 8, borderBottom: '1px solid var(--apple-border)' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6 }}>
-              <strong style={{ fontSize: '0.82rem' }}>{user.username}</strong>
-              <span className="apple-tag">{user.role}</span>
+          <div className="sidebar-user-card">
+            <div className="sidebar-user-head">
+              <strong>{user.username}</strong>
+              <span className={`role-pill ${user.role === 'ADMIN' ? 'role-admin' : 'role-viewer'}`}>
+                {user.role}
+              </span>
             </div>
             {user.full_name && <div className="footer-line">{user.full_name}</div>}
-            <button type="button" className="apple-btn secondary full" onClick={onLogout}> Đăng xuất </button>
+            <div className="sidebar-user-actions">
+              <button
+                type="button"
+                className="apple-btn secondary"
+                onClick={onOpenChangePassword}
+              >
+                Đổi MK
+              </button>
+              <button type="button" className="apple-btn tone-red" onClick={onLogout}>
+                Đăng xuất
+              </button>
+            </div>
           </div>
         )}
 
@@ -71,7 +80,9 @@ export default function Sidebar({ view, onChange, state, user, onLogout }) {
           <span>●</span>
           <span>{state?.db_stats?.connected ? 'MongoDB Atlas' : 'Bộ nhớ cục bộ (offline)'}</span>
         </div>
-        <div className="footer-line"> Containerlab: <strong>{state?.lab_running ? 'Đang chạy' : 'Chưa chạy'}</strong> </div>
+        <div className="footer-line">
+          Containerlab: <strong>{state?.lab_running ? 'Đang chạy' : 'Chưa chạy'}</strong>
+        </div>
       </div>
     </aside>
   );
