@@ -112,6 +112,9 @@ class TelegramChatOpsNotifier:
 
         self.l2_seconds = _parse_int_env("ESCALATION_L2_SECONDS", 30, 5)
         self.l3_seconds = _parse_int_env("ESCALATION_L3_SECONDS", 60, self.l2_seconds + 5)
+        self.notify_ai = True
+        self.notify_infra = True
+        self.notify_resolved = True
 
         admin_raw = os.environ.get("TELEGRAM_ADMIN_IDS", "").strip()
         self.allowed_ids = {
@@ -169,6 +172,41 @@ class TelegramChatOpsNotifier:
     def stop(self) -> None:
         self._stop_event.set()
 
+    def apply_runtime_settings(self, cfg: Dict[str, Any]) -> None:
+        """Áp dụng nóng cài đặt từ trang Cài đặt chung mà không cần khởi động lại server."""
+        if not isinstance(cfg, dict):
+            return
+        with self._lock:
+            if "escalation_l2_seconds" in cfg:
+                self.l2_seconds = max(5, int(cfg["escalation_l2_seconds"]))
+            if "escalation_l3_seconds" in cfg:
+                self.l3_seconds = max(self.l2_seconds + 5, int(cfg["escalation_l3_seconds"]))
+            if "telegram_notify_ai" in cfg:
+                self.notify_ai = bool(cfg["telegram_notify_ai"])
+            if "telegram_notify_infra" in cfg:
+                self.notify_infra = bool(cfg["telegram_notify_infra"])
+            if "telegram_notify_resolved" in cfg:
+                self.notify_resolved = bool(cfg["telegram_notify_resolved"])
+            if "telegram_chat_id" in cfg:
+                self.chat_id = str(cfg["telegram_chat_id"] or "").strip()
+            if "telegram_l2_chat_id" in cfg:
+                self.raw_l2_chat_id = str(cfg["telegram_l2_chat_id"] or "").strip()
+            self.l2_chat_id = self.raw_l2_chat_id or self.chat_id
+            if "telegram_admin_ids" in cfg:
+                admin_raw = str(cfg["telegram_admin_ids"] or "").strip()
+                new_allowed = {x.strip() for x in admin_raw.split(",") if x.strip()}
+                if self.chat_id:
+                    new_allowed.add(self.chat_id)
+                if self.l2_chat_id:
+                    new_allowed.add(self.l2_chat_id)
+                self.allowed_ids = new_allowed
+            else:
+                if self.chat_id:
+                    self.allowed_ids.add(self.chat_id)
+                if self.l2_chat_id:
+                    self.allowed_ids.add(self.l2_chat_id)
+            self.enabled = bool(self.bot_token and self.chat_id)
+
     def get_status(self) -> Dict[str, Any]:
         with self._lock:
             return {
@@ -178,6 +216,9 @@ class TelegramChatOpsNotifier:
                 "l2_separate": bool(self.raw_l2_chat_id and self.raw_l2_chat_id != self.chat_id),
                 "l2_seconds": self.l2_seconds,
                 "l3_seconds": self.l3_seconds,
+                "notify_ai": self.notify_ai,
+                "notify_infra": self.notify_infra,
+                "notify_resolved": self.notify_resolved,
                 "bot_username": self.bot_username,
                 "sent_count": self.sent_count,
                 "last_sent_at": self.last_sent_at,
@@ -375,7 +416,7 @@ class TelegramChatOpsNotifier:
         return "\n".join(lines)
 
     def notify_pending_l1(self, item: Dict[str, Any]) -> None:
-        if not self.enabled:
+        if not self.enabled or not self.notify_ai:
             return
         sid = str(item["service_id"])
         sev = str(item.get("severity_level", "HIGH")).upper()
@@ -417,7 +458,7 @@ class TelegramChatOpsNotifier:
         self._enqueue(_job)
 
     def notify_escalation_l2(self, item: Dict[str, Any], elapsed_s: int) -> None:
-        if not self.enabled:
+        if not self.enabled or not self.notify_ai:
             return
         sid = str(item["service_id"])
         sev = str(item.get("severity_level", "HIGH")).upper()
@@ -467,7 +508,7 @@ class TelegramChatOpsNotifier:
         actor: str,
         exec_status: str = "EXECUTED",
     ) -> None:
-        if not self.enabled:
+        if not self.enabled or not self.notify_ai:
             return
         sid = str(service["service_id"])
         if mode == "ESCALATION-L3":
@@ -516,7 +557,7 @@ class TelegramChatOpsNotifier:
         tier: str = "L1",
     ) -> None:
         """Cảnh báo Unknown_Anomaly (KHÔNG BAO GIỜ tự chặn, kể cả ở Tầng 3)."""
-        if not self.enabled:
+        if not self.enabled or not self.notify_ai:
             return
         if tier == "L3":
             header = "🚨 [LEO THANG TẦNG 3 — YÊU CẦU KIỂM TRA THỦ CÔNG]"
@@ -549,7 +590,7 @@ class TelegramChatOpsNotifier:
         prev_fault: str,
         metrics: Dict[str, Any],
     ) -> None:
-        if not self.enabled:
+        if not self.enabled or not self.notify_resolved:
             return
         text = "\n".join(
             [
@@ -575,7 +616,7 @@ class TelegramChatOpsNotifier:
         summary: str,
     ) -> None:
         """Thông báo cảnh báo hạ tầng cứng từ Prometheus/Alertmanager (chỉ báo, KHÔNG chạy iptables)."""
-        if not self.enabled:
+        if not self.enabled or not self.notify_infra:
             return
         is_resolved = str(status).lower() == "resolved"
         header = (

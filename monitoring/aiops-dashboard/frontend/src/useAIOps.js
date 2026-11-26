@@ -64,13 +64,18 @@ export function useAIOps(intervalMs = 2000) {
     }
   }, [forceLogout]);
 
-  // Chỉ polling khi đã xác thực thành công
+  const effectivePollMs = Math.max(
+    1000,
+    Math.min(10000, Number(state?.settings?.ui_poll_interval_ms) || intervalMs)
+  );
+
+  // Chỉ polling khi đã xác thực thành công (tự cập nhật nhịp khi admin đổi trong Cài đặt chung)
   useEffect(() => {
     if (!user) return undefined;
     refresh();
-    const t = setInterval(refresh, intervalMs);
+    const t = setInterval(refresh, effectivePollMs);
     return () => clearInterval(t);
-  }, [user, refresh, intervalMs]);
+  }, [user, refresh, effectivePollMs]);
 
   const login = useCallback(async (username, password) => {
     const res = await api.login(username, password);
@@ -128,6 +133,17 @@ export function useAIOps(intervalMs = 2000) {
     dismiss: (service_id) => act(() => api.dismiss(service_id)),
     rollback: (service_id) => act(() => api.rollback(service_id)),
     testTelegram: () => api.testTelegram(),
+    getSettings: () => api.getSettings(),
+    updateSettings: async (payload) => {
+      const res = await api.updateSettings(payload);
+      if (res.state) setState(res.state);
+      return res;
+    },
+    resetSettings: async () => {
+      const res = await api.resetSettings();
+      if (res.state) setState(res.state);
+      return res;
+    },
     createService: (payload) => act(() => api.createService(payload)),
     updateService: (service_id, payload) => act(() => api.updateService(service_id, payload)),
     deleteService: (service_id) => act(() => api.deleteService(service_id)),

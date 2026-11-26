@@ -32,7 +32,7 @@ import urllib.parse
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import joblib
 import numpy as np
@@ -130,7 +130,7 @@ class AIOpsStateEngine:
         print(f"[✓] Ngưỡng sustained_ratio đồng bộ: {self.sustained_thresholds}")
 
         self.db = AIOpsDatabase()
-        policy_cfg = self.db.get_policy_config()
+        sys_cfg = self.db.get_system_settings()
 
         self.prom_url = os.environ.get("PROMETHEUS_URL", "http://127.0.0.1:9090")
         self.collector = RealContainerlabTelemetryCollector(prom_url=self.prom_url)
@@ -142,8 +142,14 @@ class AIOpsStateEngine:
             self.collector.ensure_services_registered(list(self.db.services_cache))
 
         self.tick_counter = 0
-        self.forecast_threshold = float(policy_cfg.get("threshold_pct", 60.0)) / 100.0
-        self.auto_pilot = bool(policy_cfg.get("auto_pilot", True))
+        self.forecast_threshold = float(sys_cfg.get("forecast_threshold_pct", 60.0)) / 100.0
+        self.auto_pilot = bool(sys_cfg.get("auto_pilot", True))
+        self.l3_auto_mitigate = bool(sys_cfg.get("l3_auto_mitigate", True))
+        self.l3_min_confidence_pct = float(sys_cfg.get("l3_min_confidence_pct", 80.0))
+        self.auto_resolved_cycles = int(sys_cfg.get("auto_resolved_cycles", 2))
+        self.incident_cooldown_seconds = float(sys_cfg.get("incident_cooldown_seconds", 12.0))
+        self.dismissed_cooldown_seconds = float(sys_cfg.get("dismissed_cooldown_seconds", 45.0))
+        self.spike_log_cooldown_seconds = float(sys_cfg.get("spike_log_cooldown_seconds", 18.0))
 
         # Cửa sổ trượt 5 bước riêng cho từng dịch vụ
         self.service_windows: Dict[str, List[Dict[str, float]]] = {}
@@ -164,6 +170,7 @@ class AIOpsStateEngine:
             get_status_summary=self._tg_status_summary,
             get_pending_summary=self._tg_pending_summary,
         )
+        self.notifier.apply_runtime_settings(sys_cfg)
 
         self.audit_logs: List[Dict[str, Any]] = list(self.db.remediations_cache) or [
             {
@@ -543,7 +550,7 @@ class AIOpsStateEngine:
 
             if sev == "NORMAL":
                 p["normal_streak"] = int(p.get("normal_streak", 0)) + 1
-                if p["normal_streak"] >= 2:
+                if p["normal_streak"] >= int(getattr(self, "auto_resolved_cycles", 2)):
                     self.pending_approvals.pop(sid, None)
                     notify_events.append(
                         (
@@ -606,9 +613,12 @@ class AIOpsStateEngine:
                 p["escalation_tier"] = "L3"
                 plan = p.get("remediation") or {}
                 conf_pct = float(p.get("confidence_pct", 0.0))
+                l3_auto = bool(getattr(self, "l3_auto_mitigate", True))
+                l3_min_conf = float(getattr(self, "l3_min_confidence_pct", 80.0))
                 can_auto_protect = (
-                    p.get("fault_class") != "Unknown_Anomaly"
-                    and conf_pct >= 80.0
+                    l3_auto
+                    and p.get("fault_class") != "Unknown_Anomaly"
+                    and conf_pct >= l3_min_conf
                     and bool(plan.get("apply_cmds"))
                 )
                 if can_auto_protect:
@@ -639,11 +649,16 @@ class AIOpsStateEngine:
                         )
                     )
                 else:
-                    # Quy tắc an toàn bắt buộc: Unknown_Anomaly hoặc độ tin cậy < 80% KHÔNG BAO GIỜ tự chặn
+                    # Quy tắc an toàn bắt buộc: Unknown_Anomaly, tắt L3 auto, hoặc độ tin cậy < ngưỡng KHÔNG tự chặn
                     target_str = f"{srv_doc['service_name']} ({srv_doc['address']}:{srv_doc['port']})"
+                    reason = (
+                        "chế độ tự bảo vệ Tầng 3 đang tắt"
+                        if not l3_auto
+                        else f"độ tin cậy {conf_pct:.1f}% < {l3_min_conf:.0f}% hoặc Unknown_Anomaly"
+                    )
                     action_str = (
-                        f"[LEO THANG TẦNG 3 — THỦ CÔNG] Không tự chặn do độ tin cậy {conf_pct:.1f}% < 80% "
-                        f"hoặc Unknown_Anomaly — yêu cầu quản trị viên kiểm tra!"
+                        f"[LEO THANG TẦNG 3 — THỦ CÔNG] Không tự chặn do {reason} "
+                        "— yêu cầu quản trị viên kiểm tra!"
                     )
                     self.audit_logs.insert(
                         0,
@@ -729,7 +744,7 @@ class AIOpsStateEngine:
 
             # Tầng 0 (SUPPRESSED): TransientSpike -> CHỈ ghi log, TUYỆT ĐỐI KHÔNG gửi Telegram!
             if ev["severity_level"] == "MEDIUM" and not ev["policy_gate"]["trigger_model3"]:
-                if now_ts - self.spike_log_cooldown.get(sid, 0.0) >= 18.0:
+                if now_ts - self.spike_log_cooldown.get(sid, 0.0) >= float(getattr(self, "spike_log_cooldown_seconds", 18.0)):
                     self.spike_log_cooldown[sid] = now_ts
                     result_id = self.db.record_ai_inference_and_incident(
                         service_id=sid,
@@ -775,7 +790,7 @@ class AIOpsStateEngine:
             if not ev["policy_gate"]["trigger_model3"]:
                 continue
 
-            if now_ts - self.dismissed_cooldown.get(sid, 0.0) < 45.0:
+            if now_ts - self.dismissed_cooldown.get(sid, 0.0) < float(getattr(self, "dismissed_cooldown_seconds", 45.0)):
                 continue
 
             fault_cls = ev["model3"]["fault_class"]
@@ -797,7 +812,7 @@ class AIOpsStateEngine:
                 and self.pending_approvals[sid].get("remediation", {}).get("attacker_ip") == plan.get("attacker_ip")
             ):
                 continue
-            if now_ts - self.incident_cooldown.get(sid, 0.0) < 12.0:
+            if now_ts - self.incident_cooldown.get(sid, 0.0) < float(getattr(self, "incident_cooldown_seconds", 12.0)):
                 continue
 
             self.incident_cooldown[sid] = now_ts
@@ -928,12 +943,13 @@ class AIOpsStateEngine:
                 )
                 notify_events.append(("pending_l1", {"item": dict(pending_item)}))
 
-        # 4) Theo dõi Auto-Resolved: khi dịch vụ từng cảnh báo quay về NORMAL ổn định >= 2 chu kỳ liên tiếp
+        # 4) Theo dõi Auto-Resolved: khi dịch vụ từng cảnh báo quay về NORMAL ổn định >= N chu kỳ liên tiếp
+        resolved_need = int(getattr(self, "auto_resolved_cycles", 2))
         for sid, info in list(self.alerted_services.items()):
             ev = service_evaluations.get(sid)
             if ev and ev.get("severity_level") == "NORMAL" and sid not in self.pending_approvals:
                 info["normal_streak"] = int(info.get("normal_streak", 0)) + 1
-                if info["normal_streak"] >= 2:
+                if info["normal_streak"] >= resolved_need:
                     self.alerted_services.pop(sid, None)
                     notify_events.append(
                         (
@@ -1077,6 +1093,7 @@ class AIOpsStateEngine:
             },
             "db_stats": self.db.get_collection_stats(),
             "telegram": self.notifier.get_status(),
+            "settings": self.db.get_public_settings(),
             "audit_logs": self.audit_logs[:15],
         }
         return state, actions_to_run, notify_events
@@ -1089,6 +1106,7 @@ class AIOpsStateEngine:
         st["audit_logs"] = self.audit_logs[:15]
         st["db_stats"] = self.db.get_collection_stats()
         st["telegram"] = self.notifier.get_status()
+        st["settings"] = self.db.get_public_settings()
         if isinstance(st.get("policy_gate"), dict):
             pg = dict(st["policy_gate"])
             pg["auto_pilot"] = self.auto_pilot
@@ -1326,7 +1344,8 @@ class AIOpsStateEngine:
                 dismissed_ids.append(sid)
                 self.dismissed_cooldown[sid] = now_ts
                 target_str = f"{p['service_name']} ({p['address']}:{p['port']})"
-                action_str = f"[ĐÃ BỎ QUA] Quản trị viên bỏ qua đề xuất chặn cho {p['fault_class']} (tạm tắt 45s)"
+                cd_sec = int(getattr(self, "dismissed_cooldown_seconds", 45))
+                action_str = f"[ĐÃ BỎ QUA] Quản trị viên bỏ qua đề xuất chặn cho {p['fault_class']} (tạm tắt {cd_sec}s)"
                 self.audit_logs.insert(
                     0,
                     {
@@ -1627,6 +1646,105 @@ class AIOpsStateEngine:
             )
         return "\n".join(lines)
 
+    # =========================================================================
+    # Cài đặt chung (Hot-Reload runtime + Lưu MongoDB Atlas + Audit Trail)
+    # =========================================================================
+    def _sync_runtime_from_settings_unlocked(self, cfg: Dict[str, Any]) -> None:
+        self.auto_pilot = bool(cfg.get("auto_pilot", True))
+        self.forecast_threshold = float(cfg.get("forecast_threshold_pct", 60.0)) / 100.0
+        self.l3_auto_mitigate = bool(cfg.get("l3_auto_mitigate", True))
+        self.l3_min_confidence_pct = float(cfg.get("l3_min_confidence_pct", 80.0))
+        self.auto_resolved_cycles = int(cfg.get("auto_resolved_cycles", 2))
+        self.incident_cooldown_seconds = float(cfg.get("incident_cooldown_seconds", 12.0))
+        self.dismissed_cooldown_seconds = float(cfg.get("dismissed_cooldown_seconds", 45.0))
+        self.spike_log_cooldown_seconds = float(cfg.get("spike_log_cooldown_seconds", 18.0))
+
+    def get_model_info(self) -> Dict[str, Any]:
+        """Thông số cố định của 2 Model AI đã huấn luyện (chỉ đọc để hiển thị minh bạch ở Cài đặt chung)."""
+        return {
+            "model1_features": len(self.m1_bundle.get("feature_names", [])),
+            "model1_thresholds": {
+                "MEDIUM": round(self.m1_th_med, 4),
+                "HIGH": round(self.m1_th_high, 4),
+                "CRITICAL": round(self.m1_th_crit, 4),
+            },
+            "model2_features": len(self.m2_rca_bundle.get("feature_names", [])),
+            "model2_confidence_threshold_pct": round(self.m2_conf_threshold * 100.0, 1),
+            "model2_classes": list(self.m2_rca_bundle.get("class_names", [])),
+        }
+
+    def apply_settings(
+        self, payload: Dict[str, Any], actor: str = "admin (Web)"
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        with self._lock:
+            updated, err = self.db.update_system_settings(payload)
+            if err or not updated:
+                return None, err or "Không thể cập nhật cài đặt"
+            self._sync_runtime_from_settings_unlocked(updated)
+            action_str = (
+                f"[CÀI ĐẶT CHUNG] Cập nhật: L2={updated['escalation_l2_seconds']}s, "
+                f"L3={updated['escalation_l3_seconds']}s (Tự bảo vệ: {'Bật' if updated['l3_auto_mitigate'] else 'Tắt'}, "
+                f"≥{updated['l3_min_confidence_pct']}%), Dự báo 5m ≥ {updated['forecast_threshold_pct']}%, "
+                f"Auto-Pilot={'Bật' if updated['auto_pilot'] else 'Tắt'}, "
+                f"Auto-Resolved={updated['auto_resolved_cycles']} chu kỳ"
+            )
+            self.audit_logs.insert(
+                0,
+                {
+                    "time": datetime.now().strftime("%H:%M:%S"),
+                    "service_id": "SYSTEM_SETTINGS",
+                    "scenario": "SettingsUpdated",
+                    "trigger": "SETTINGS",
+                    "fault_class": "Normal",
+                    "confidence": "100%",
+                    "target": "AIOps Command Center",
+                    "action": action_str,
+                    "status": "READY",
+                    "actor": actor,
+                },
+            )
+            self.audit_logs = self.audit_logs[:30]
+            self.db.record_remediation_action(
+                result_id="settings",
+                service_id="SYSTEM_SETTINGS",
+                scenario="SettingsUpdated",
+                trigger_mode="SETTINGS",
+                fault_class="Normal",
+                confidence="100%",
+                target_device="AIOps Command Center",
+                action_text=action_str,
+                status="READY",
+                actor=actor,
+            )
+            self.notifier.apply_runtime_settings(updated)
+            state = self._patch_latest_state_unlocked()
+        return {"settings": updated, "telegram": self.notifier.get_status(), "state": state}, None
+
+    def reset_settings(self, actor: str = "admin (Web)") -> Dict[str, Any]:
+        with self._lock:
+            defaults = self.db.reset_system_settings()
+            self._sync_runtime_from_settings_unlocked(defaults)
+            action_str = "[CÀI ĐẶT CHUNG] Đã khôi phục toàn bộ thông số vận hành về mặc định chuẩn (L2=30s, L3=60s, Dự báo 5m ≥ 60%)"
+            self.audit_logs.insert(
+                0,
+                {
+                    "time": datetime.now().strftime("%H:%M:%S"),
+                    "service_id": "SYSTEM_SETTINGS",
+                    "scenario": "SettingsReset",
+                    "trigger": "SETTINGS",
+                    "fault_class": "Normal",
+                    "confidence": "100%",
+                    "target": "AIOps Command Center",
+                    "action": action_str,
+                    "status": "READY",
+                    "actor": actor,
+                },
+            )
+            self.audit_logs = self.audit_logs[:30]
+            self.notifier.apply_runtime_settings(defaults)
+            state = self._patch_latest_state_unlocked()
+        return {"settings": defaults, "telegram": self.notifier.get_status(), "state": state}
+
 
 ENGINE = AIOpsStateEngine()
 
@@ -1767,7 +1885,18 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
                 return
             with ENGINE._lock:
                 users = ENGINE.db.list_users()
-            self._send_json({"Users": users})        
+            self._send_json({"Users": users})
+
+        elif self.path.startswith("/api/settings"):
+            if not self._require_auth(admin_only=True):
+                return
+            with ENGINE._lock:
+                payload = {
+                    "settings": ENGINE.db.get_system_settings(),
+                    "telegram": ENGINE.notifier.get_status(),
+                    "model_info": ENGINE.get_model_info(),
+                }
+            self._send_json(payload)
 
         elif self.path.startswith("/api/"):
             self.send_error(404, "Unknown API endpoint")
@@ -1878,6 +2007,10 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
                 {"ok": ok, "message": msg, "telegram": ENGINE.notifier.get_status()},
                 status=200 if ok else 400,
             )
+
+        elif self.path == "/api/settings/reset":
+            res = ENGINE.reset_settings(actor=actor)
+            self._send_json(res)
         
         elif self.path.startswith("/api/services"):
             with ENGINE._lock:
@@ -1938,6 +2071,16 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": err}, status=400)
                 return
             self._send_json({"user": updated, "Users": users})
+
+        elif self.path.startswith("/api/settings"):
+            user = self._require_auth(admin_only=True)
+            if not user:
+                return
+            res, err = ENGINE.apply_settings(body, actor=f"{user['username']} (Web)")
+            if err or not res:
+                self._send_json({"error": err or "Cập nhật cài đặt thất bại"}, status=400)
+                return
+            self._send_json(res)
 
         else:
             self.send_error(404, "Unknown API endpoint")

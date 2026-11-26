@@ -7,6 +7,7 @@ export const NAV_ITEMS = [
   { id: 'response', label: 'Ứng phó & Cảnh báo', icon: 'shield' },
   { id: 'services', label: 'Quản lý dịch vụ', icon: 'server' },
   { id: 'users', label: 'Quản lý tài khoản', icon: 'users', adminOnly: true },
+  { id: 'settings', label: 'Cài đặt chung', icon: 'settings', adminOnly: true },
 ];
 
 export default function Sidebar({ view, onChange, state, user, onLogout, onOpenChangePassword }) {

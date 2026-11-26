@@ -8,6 +8,7 @@ import ResponsePage from './pages/ResponsePage.jsx';
 import ServicesPage from './pages/ServicesPage.jsx';
 import LoginPage from './pages/LoginPage.jsx';
 import UsersPage from './pages/UserPage.jsx';
+import SettingsPage from './pages/SettingsPage.jsx';
 
 function parseHashView() {
   const hash = window.location.hash.replace(/^#\/?/, '');
@@ -128,7 +129,8 @@ export default function App() {
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
 
-  const activeView = ctx.user && view === 'users' && ctx.user.role !== 'ADMIN' ? 'overview' : view;
+  const isAdminOnlyView = NAV_ITEMS.some((n) => n.id === view && n.adminOnly);
+  const activeView = ctx.user && isAdminOnlyView && ctx.user.role !== 'ADMIN' ? 'overview' : view;
 
   useEffect(() => {
     if (!ctx.authReady) return;
@@ -186,6 +188,7 @@ export default function App() {
           {activeView === 'response' && <ResponsePage ctx={ctx} />}
           {activeView === 'services' && <ServicesPage ctx={ctx} onOpenService={openService} />}
           {activeView === 'users' && ctx.user.role === 'ADMIN' && <UsersPage ctx={ctx} />}
+          {activeView === 'settings' && ctx.user.role === 'ADMIN' && <SettingsPage ctx={ctx} />}
         </main>
       </div>
       {showPwModal && (

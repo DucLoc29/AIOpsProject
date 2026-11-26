@@ -156,6 +156,40 @@ IP_TO_OOB = {
 }
 
 
+def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    try:
+        val = int(raw) if raw else default
+    except ValueError:
+        val = default
+    return max(minimum, min(maximum, val))
+
+
+def build_default_system_settings() -> Dict[str, Any]:
+    """Tham số vận hành mặc định (nạp khởi tạo từ .env, có thể tinh chỉnh nóng trên trang Cài đặt chung)."""
+    l2 = _env_int("ESCALATION_L2_SECONDS", 30, 5, 600)
+    l3 = max(l2 + 5, _env_int("ESCALATION_L3_SECONDS", 60, 10, 1800))
+    return {
+        "auto_pilot": True,
+        "forecast_threshold_pct": 60.0,
+        "escalation_l2_seconds": l2,
+        "escalation_l3_seconds": l3,
+        "l3_auto_mitigate": True,
+        "l3_min_confidence_pct": 80.0,
+        "auto_resolved_cycles": 2,
+        "incident_cooldown_seconds": 12,
+        "dismissed_cooldown_seconds": 45,
+        "spike_log_cooldown_seconds": 18,
+        "telegram_notify_ai": True,
+        "telegram_notify_infra": True,
+        "telegram_notify_resolved": True,
+        "telegram_chat_id": os.environ.get("TELEGRAM_CHAT_ID", "").strip(),
+        "telegram_l2_chat_id": os.environ.get("TELEGRAM_L2_CHAT_ID", "").strip(),
+        "telegram_admin_ids": os.environ.get("TELEGRAM_ADMIN_IDS", "").strip(),
+        "ui_poll_interval_ms": 2000,
+    }
+
+
 def build_default_users() -> List[Dict[str, Any]]:
     """Tạo 2 tài khoản mặc định (admin / viewer) với mật khẩu đã băm PBKDF2-SHA256."""
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -198,6 +232,7 @@ class AIOpsDatabase:
         self.alerts_cache: List[Dict[str, Any]] = []
         self.remediations_cache: List[Dict[str, Any]] = []
         self.users_cache: List[Dict[str, Any]] = build_default_users()
+        self.system_settings: Dict[str, Any] = build_default_system_settings()
         self.counts: Dict[str, int] = {
             "Services": len(self.services_cache),
             "AlertRules": len(self.rules_cache),
@@ -257,8 +292,8 @@ class AIOpsDatabase:
             current_rule_ids = {
                 doc.get("rule_id") for doc in self.db["AlertRules"].find({}, {"rule_id": 1})
             }
-            if current_rule_ids != expected_rule_ids:
-                self.db["AlertRules"].delete_many({})
+            if not expected_rule_ids.issubset(current_rule_ids):
+                self.db["AlertRules"].delete_many({"rule_id": {"$ne": "rule_system_settings"}})
                 self.db["AlertRules"].insert_many([dict(r) for r in DEFAULT_ALERT_RULES])
 
             if self.db["Users"].count_documents({}) == 0:
@@ -412,9 +447,26 @@ class AIOpsDatabase:
                             s[k] = prev[k]
                     merged_services.append(s)
                 self.services_cache = merged_services
-            self.rules_cache = list(
-                self.db["AlertRules"].find({}, {"_id": 0})
-            ) or [dict(r) for r in DEFAULT_ALERT_RULES]
+            all_rules = list(self.db["AlertRules"].find({}, {"_id": 0}))
+            settings_doc = next((r for r in all_rules if r.get("rule_id") == "rule_system_settings"), None)
+            self.rules_cache = [
+                r for r in all_rules if r.get("rule_id") != "rule_system_settings"
+            ] or [dict(r) for r in DEFAULT_ALERT_RULES]
+
+            merged_settings = build_default_system_settings()
+            policy_cfg = self.get_policy_config()
+            merged_settings["auto_pilot"] = bool(policy_cfg.get("auto_pilot", True))
+            merged_settings["forecast_threshold_pct"] = float(policy_cfg.get("threshold_pct", 60.0))
+            if settings_doc and isinstance(settings_doc.get("settings"), dict):
+                saved = settings_doc["settings"]
+                for k, v in saved.items():
+                    if k not in merged_settings or v is None:
+                        continue
+                    # Nếu .env mới cấu hình Telegram mà bản lưu cũ đang trống thì ưu tiên .env
+                    if k in ("telegram_chat_id", "telegram_admin_ids") and not str(v).strip() and merged_settings[k]:
+                        continue
+                    merged_settings[k] = v
+            self.system_settings = merged_settings
             self.ai_results_cache = list(
                 self.db["AIResults"].find({}, {"_id": 0}).sort("timestamp", -1).limit(15)
             )
@@ -651,6 +703,11 @@ class AIOpsDatabase:
                 if auto_pilot is not None:
                     r["auto_remediate"] = bool(auto_pilot)
 
+        if threshold_pct is not None:
+            self.system_settings["forecast_threshold_pct"] = round(float(threshold_pct), 1)
+        if auto_pilot is not None:
+            self.system_settings["auto_pilot"] = bool(auto_pilot)
+
         if self.connected and self.db is not None:
             update_fields: Dict[str, Any] = {}
             if threshold_pct is not None:
@@ -659,11 +716,148 @@ class AIOpsDatabase:
                 update_fields["auto_remediate"] = bool(auto_pilot)
             if update_fields:
                 uf_copy = dict(update_fields)
+                settings_copy = dict(self.system_settings)
                 self._run_async(
-                    lambda: self.db["AlertRules"].update_one(
-                        {"rule_id": "rule_ai_policy_gate"}, {"$set": uf_copy}, upsert=True
+                    lambda: (
+                        self.db["AlertRules"].update_one(
+                            {"rule_id": "rule_ai_policy_gate"}, {"$set": uf_copy}, upsert=True
+                        ),
+                        self.db["AlertRules"].update_one(
+                            {"rule_id": "rule_system_settings"},
+                            {
+                                "$set": {
+                                    "rule_id": "rule_system_settings",
+                                    "settings": settings_copy,
+                                    "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                }
+                            },
+                            upsert=True,
+                        ),
                     )
                 )
+
+    def get_system_settings(self) -> Dict[str, Any]:
+        return dict(self.system_settings)
+
+    def get_public_settings(self) -> Dict[str, Any]:
+        """Trả cài đặt vận hành không chứa thông tin nhạy cảm (Chat ID / Admin ID) để đính kèm /api/state."""
+        return {
+            k: v
+            for k, v in self.system_settings.items()
+            if k not in ("telegram_chat_id", "telegram_l2_chat_id", "telegram_admin_ids")
+        }
+
+    def update_system_settings(
+        self, payload: Dict[str, Any]
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        if not isinstance(payload, dict):
+            return None, "Dữ liệu cài đặt không hợp lệ"
+
+        cur = dict(self.system_settings)
+
+        def _parse_num(key: str, cast, lo, hi, label: str):
+            if key not in payload:
+                return cur[key], None
+            try:
+                val = cast(payload[key])
+            except (TypeError, ValueError):
+                return None, f"{label} phải là số hợp lệ"
+            if val < lo or val > hi:
+                return None, f"{label} phải nằm trong khoảng {lo} – {hi}"
+            return val, None
+
+        l2, err = _parse_num("escalation_l2_seconds", int, 5, 600, "Thời gian leo thang Tầng 2 (giây)")
+        if err:
+            return None, err
+        l3, err = _parse_num("escalation_l3_seconds", int, 10, 1800, "Thời gian leo thang Tầng 3 (giây)")
+        if err:
+            return None, err
+        if l3 < l2 + 5:
+            return None, f"Thời gian leo thang Tầng 3 ({l3}s) phải lớn hơn Tầng 2 ít nhất 5 giây (≥ {l2 + 5}s)"
+
+        forecast_pct, err = _parse_num("forecast_threshold_pct", float, 40.0, 90.0, "Ngưỡng dự báo 5 phút (%)")
+        if err:
+            return None, err
+        l3_conf, err = _parse_num("l3_min_confidence_pct", float, 70.0, 99.0, "Độ tin cậy tối thiểu Tầng 3 (%)")
+        if err:
+            return None, err
+        auto_res_cycles, err = _parse_num("auto_resolved_cycles", int, 1, 10, "Số chu kỳ hồi phục Auto-Resolved")
+        if err:
+            return None, err
+        inc_cd, err = _parse_num("incident_cooldown_seconds", int, 5, 120, "Cooldown chống lặp sự cố (giây)")
+        if err:
+            return None, err
+        dis_cd, err = _parse_num("dismissed_cooldown_seconds", int, 10, 600, "Thời gian tạm ẩn sau khi Bỏ qua (giây)")
+        if err:
+            return None, err
+        spk_cd, err = _parse_num("spike_log_cooldown_seconds", int, 5, 120, "Cooldown ghi log TransientSpike (giây)")
+        if err:
+            return None, err
+        poll_ms, err = _parse_num("ui_poll_interval_ms", int, 1000, 10000, "Chu kỳ làm mới giao diện (ms)")
+        if err:
+            return None, err
+
+        def _parse_bool(key: str) -> bool:
+            return bool(payload[key]) if key in payload else bool(cur[key])
+
+        def _parse_str(key: str) -> str:
+            return str(payload[key]).strip() if key in payload else str(cur.get(key, "")).strip()
+
+        updated: Dict[str, Any] = {
+            "auto_pilot": _parse_bool("auto_pilot"),
+            "forecast_threshold_pct": round(float(forecast_pct), 1),
+            "escalation_l2_seconds": int(l2),
+            "escalation_l3_seconds": int(l3),
+            "l3_auto_mitigate": _parse_bool("l3_auto_mitigate"),
+            "l3_min_confidence_pct": round(float(l3_conf), 1),
+            "auto_resolved_cycles": int(auto_res_cycles),
+            "incident_cooldown_seconds": int(inc_cd),
+            "dismissed_cooldown_seconds": int(dis_cd),
+            "spike_log_cooldown_seconds": int(spk_cd),
+            "telegram_notify_ai": _parse_bool("telegram_notify_ai"),
+            "telegram_notify_infra": _parse_bool("telegram_notify_infra"),
+            "telegram_notify_resolved": _parse_bool("telegram_notify_resolved"),
+            "telegram_chat_id": _parse_str("telegram_chat_id"),
+            "telegram_l2_chat_id": _parse_str("telegram_l2_chat_id"),
+            "telegram_admin_ids": _parse_str("telegram_admin_ids"),
+            "ui_poll_interval_ms": int(poll_ms),
+        }
+
+        self.system_settings = updated
+        self.update_policy_rule(
+            threshold_pct=updated["forecast_threshold_pct"],
+            auto_pilot=updated["auto_pilot"],
+        )
+        return dict(updated), None
+
+    def reset_system_settings(self) -> Dict[str, Any]:
+        """Khôi phục thông số vận hành về mặc định chuẩn đồ án, giữ nguyên kết nối Telegram Chat ID hiện tại."""
+        cur = dict(self.system_settings)
+        defaults = {
+            "auto_pilot": True,
+            "forecast_threshold_pct": 60.0,
+            "escalation_l2_seconds": 30,
+            "escalation_l3_seconds": 60,
+            "l3_auto_mitigate": True,
+            "l3_min_confidence_pct": 80.0,
+            "auto_resolved_cycles": 2,
+            "incident_cooldown_seconds": 12,
+            "dismissed_cooldown_seconds": 45,
+            "spike_log_cooldown_seconds": 18,
+            "telegram_notify_ai": True,
+            "telegram_notify_infra": True,
+            "telegram_notify_resolved": True,
+            "telegram_chat_id": cur.get("telegram_chat_id", ""),
+            "telegram_l2_chat_id": cur.get("telegram_l2_chat_id", ""),
+            "telegram_admin_ids": cur.get("telegram_admin_ids", ""),
+            "ui_poll_interval_ms": 2000,
+        }
+        self.system_settings = defaults
+        self.update_policy_rule(
+            threshold_pct=defaults["forecast_threshold_pct"],
+            auto_pilot=defaults["auto_pilot"],
+        )
+        return dict(defaults)
 
     def record_ai_inference_and_incident(
         self,

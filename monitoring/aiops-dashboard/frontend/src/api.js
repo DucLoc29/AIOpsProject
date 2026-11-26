@@ -53,4 +53,7 @@ export const api = {
   createUser: (payload) => sendJson('POST', '/api/users', payload),
   updateUser: (username, payload) => sendJson('PUT', `/api/users/${encodeURIComponent(username)}`, payload),
   deleteUser: (username) => sendJson('DELETE', `/api/users/${encodeURIComponent(username)}`, { username }),
+  getSettings: () => request('/api/settings'),
+  updateSettings: (payload) => sendJson('PUT', '/api/settings', payload),
+  resetSettings: () => sendJson('POST', '/api/settings/reset', {}),
 };

@@ -28,6 +28,7 @@ export default function ResponsePage({ ctx }) {
   const pending = net.pending_approvals || [];
   const auto = state.policy_gate?.auto_pilot;
   const tg = state.telegram || {};
+  const cfg = state.settings || {};
 
   const [testingTg, setTestingTg] = useState(false);
   const [tgNotice, setTgNotice] = useState(null);
@@ -104,8 +105,15 @@ export default function ResponsePage({ ctx }) {
           <span><strong>Tầng 0:</strong> Lọc TransientSpike (0 tin)</span>
           <span><strong>Tầng 1:</strong> Báo ngay (0s)</span>
           <span><strong>Tầng 2:</strong> Leo thang ({tg.l2_seconds || 30}s)</span>
-          <span><strong>Tầng 3:</strong> Tự bảo vệ ({tg.l3_seconds || 60}s, ≥80%)</span>
-          <span><strong>Auto-Resolved:</strong> Báo khi hồi phục</span>
+          <span>
+            <strong>Tầng 3:</strong>{' '}
+            {cfg.l3_auto_mitigate === false
+              ? `Chỉ báo thủ công (${tg.l3_seconds || 60}s)`
+              : `Tự bảo vệ (${tg.l3_seconds || 60}s, ≥${cfg.l3_min_confidence_pct || 80}%)`}
+          </span>
+          <span>
+            <strong>Auto-Resolved:</strong> {cfg.auto_resolved_cycles || 2} chu kỳ NORMAL
+          </span>
         </div>
         <div className="tg-footer-row">
           <span className="muted">
