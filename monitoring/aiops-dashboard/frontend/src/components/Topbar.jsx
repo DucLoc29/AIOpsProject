@@ -7,7 +7,7 @@ const TITLES = {
   response: ['Ứng phó & Cảnh báo', 'Luật chặn đang áp dụng, cảnh báo và nhật ký xử lý'],
   services: ['Quản lý dịch vụ', 'Thêm, sửa, xóa các dịch vụ được giám sát'],
   users: ['Quản lý tài khoản', 'Thêm, sửa, phân quyền và xóa tài khoản truy cập'],
-  settings: ['Cài đặt chung', 'Điều chỉnh thời gian leo thang L1–L3, ngưỡng AI Policy, Cooldown và kênh Telegram'],
+  settings: ['Cài đặt chung', 'Điều chỉnh thông số leo thang, ứng phó và kênh Telegram'],
 };
 
 export default function Topbar({ view, state }) {

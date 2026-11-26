@@ -702,28 +702,18 @@ body {
 .tier-pill.tier-L2 { background: var(--apple-orange-soft); color: var(--apple-orange-text); }
 .tier-pill.tier-L3 { background: var(--apple-red-soft); color: var(--apple-red-text); }
 
-/* ===== Settings Page (Cài đặt chung) ===== */
+/* ===== Settings Page (Cài đặt chung — Gọn nhẹ) ===== */
 .settings-form {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 14px;
 }
-.settings-sticky-bar {
+.settings-top-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 16px 20px;
-}
-.settings-bar-left {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
   gap: 10px;
-}
-.settings-bar-left h3 {
-  margin: 0;
 }
 .preset-row {
   display: flex;
@@ -732,127 +722,55 @@ body {
 }
 .preset-btn {
   font-size: 0.75rem;
-  padding: 6px 11px;
-}
-.escalation-timeline {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin: 14px 0 18px;
-  padding: 14px;
-  border-radius: 14px;
-  background: #f5f5f7;
-  border: 1px solid var(--apple-border);
-}
-.timeline-node {
-  flex: 1 1 130px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 10px 12px;
-  border-radius: 12px;
-  background: #ffffff;
-  border: 1px solid var(--apple-border);
-}
-.timeline-node span {
-  font-size: 0.68rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  color: var(--apple-text-muted);
-}
-.timeline-node strong {
-  font-size: 0.96rem;
-  font-weight: 700;
-  color: var(--apple-text);
-}
-.timeline-node small {
-  font-size: 0.71rem;
-  color: var(--apple-text-secondary);
-}
-.timeline-node.t1 { border-color: rgba(0, 113, 227, 0.35); }
-.timeline-node.t2 { border-color: rgba(255, 149, 0, 0.45); }
-.timeline-node.t3 { border-color: rgba(255, 59, 48, 0.45); }
-.timeline-node.t-ok { border-color: rgba(40, 205, 65, 0.45); }
-.timeline-arrow {
-  font-weight: 700;
-  color: var(--apple-text-muted);
-  font-size: 0.9rem;
+  padding: 5px 11px;
 }
 .settings-grid-3 {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 16px;
+  gap: 12px 16px;
 }
-.settings-grid-2 {
+.compact-toggle-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
-  gap: 16px;
-  align-items: start;
+  gap: 10px;
+  margin-top: 14px;
 }
-.settings-divider {
-  height: 1px;
-  background: var(--apple-border);
-  margin: 16px 0;
+.compact-toggle-grid.three {
+  grid-template-columns: repeat(3, 1fr);
+  margin-top: 4px;
 }
-.setting-toggle-row {
+.compact-toggle {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding: 10px 0;
-  border-bottom: 1px solid var(--apple-border);
-}
-.setting-toggle-row:last-of-type {
-  border-bottom: none;
-}
-.setting-label {
-  font-size: 0.88rem;
-  font-weight: 600;
-  color: var(--apple-text);
-}
-.setting-desc {
-  font-size: 0.78rem;
-  color: var(--apple-text-muted);
-  margin-top: 2px;
-}
-.setting-hint {
-  font-size: 0.72rem;
-  color: var(--apple-text-muted);
-  font-weight: 400;
-}
-.settings-slider-row {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  margin-top: 12px;
-}
-.model-readonly-box {
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: 11px;
   background: #f5f5f7;
   border: 1px solid var(--apple-border);
-  border-radius: 12px;
-  padding: 12px 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  font-size: 0.78rem;
-  color: var(--apple-text-secondary);
-}
-.model-readonly-box strong {
+  font-size: 0.81rem;
+  font-weight: 500;
   color: var(--apple-text);
 }
-.model-readonly-box code {
+.settings-model-line {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--apple-border);
+  font-size: 0.76rem;
+  color: var(--apple-text-muted);
+}
+.settings-model-line code {
   font-family: var(--font-mono);
   font-size: 0.73rem;
-  background: #ffffff;
-  border: 1px solid var(--apple-border);
+  background: #f2f2f7;
+  color: var(--apple-text);
   padding: 1px 6px;
   border-radius: 5px;
 }
 @media (max-width: 960px) {
   .settings-grid-3,
-  .settings-grid-2 {
+  .compact-toggle-grid,
+  .compact-toggle-grid.three {
     grid-template-columns: 1fr;
   }
 }
