@@ -12,6 +12,7 @@ const PATHS = {
   undo: 'M9 14 4 9l5-5M4 9h10a6 6 0 0 1 0 12h-3',
   check: 'm5 12.5 4.5 4.5L19 7.5',
   bolt: 'M13 3 5 13.5h6L10 21l8-10.5h-6L13 3Z',
+  users: 'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M13 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0Zm9 14v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75',
 };
 
 export default function Icon({ name, size = 18, stroke = 1.7 }) {

@@ -43,5 +43,9 @@ export const api = {
   deleteService: (service_id) => sendJson('DELETE', `/api/services/${service_id}`, { service_id }),
   login: (username, password) => sendJson('POST', '/api/auth/login', { username, password }),
   logout: () => sendJson('POST', '/api/auth/logout', {}),
-  me: () => request('/api/auth/me')
+  me: () => request('/api/auth/me'),
+  getUsers: () => request('/api/users'),
+  createUser: (payload) => sendJson('POST', '/api/users', payload),
+  updateUser: (username, payload) => sendJson('PUT', `/api/users/${encodeURIComponent(username)}`, payload),
+  deleteUser: (username) => sendJson('DELETE', `/api/users/${encodeURIComponent(username)}`, { username }),
 };

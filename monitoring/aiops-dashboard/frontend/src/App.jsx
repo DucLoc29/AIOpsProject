@@ -7,7 +7,7 @@ import ServiceDetailPage from './pages/ServiceDetailPage.jsx';
 import ResponsePage from './pages/ResponsePage.jsx';
 import ServicesPage from './pages/ServicesPage.jsx';
 import LoginPage from './pages/LoginPage.jsx';
-import UsersPage from './pages/UsersPage.jsx';
+import UsersPage from './pages/UserPage.jsx';
 
 function initialView() {
   const hash = window.location.hash.replace('#/', '');
@@ -19,9 +19,19 @@ export default function App() {
   const [selectedService, setSelectedService] = useState('srv_web_portal');
   const ctx = useAIOps();
 
+  // useEffect(() => {
+  //   window.location.hash = `/${view}`;
+  // }, [view]);
+  
   useEffect(() => {
-    window.location.hash = `/${view}`;
-  }, [view]);
+    if (!ctx.authReady) return;
+    if (!ctx.user) {
+      window.location.hash = '/login';
+      return;
+    }
+    const target = view === 'users' && ctx.user.role !== 'ADMIN' ? 'overview' : view;
+    window.location.hash = `/${target}`;
+  }, [ctx.authReady, ctx.user, view]);
 
   if (!ctx.authReady) {
     return <div className="boot-screen">Đang kiểm tra phiên đăng nhập...</div>;
