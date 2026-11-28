@@ -589,9 +589,11 @@ class TelegramChatOpsNotifier:
         service: Dict[str, Any],
         prev_fault: str,
         metrics: Dict[str, Any],
+        resolved_cycles: int = 2,
     ) -> None:
         if not self.enabled or not self.notify_resolved:
             return
+        cycles = max(1, int(resolved_cycles))
         text = "\n".join(
             [
                 "<b>🟢 [ĐÃ HỒI PHỤC — NORMAL]</b>",
@@ -601,7 +603,7 @@ class TelegramChatOpsNotifier:
                 f"• <b>SLA hiện tại:</b> Latency <code>{float(metrics.get('latency', 0.0)):.1f}ms</code> · "
                 f"Loss <code>{float(metrics.get('packet_loss', 0.0)):.1f}%</code> · "
                 f"Uptime <code>{float(metrics.get('uptime', 100.0)):.1f}%</code>",
-                "• <b>Trạng thái:</b> Dịch vụ đã ổn định về mức Bình thường (≥ 2 chu kỳ liên tiếp).",
+                f"• <b>Trạng thái:</b> Dịch vụ đã ổn định về mức Bình thường (≥ {cycles} chu kỳ liên tiếp).",
                 f"<i>Thời gian: {datetime.now().strftime('%H:%M:%S')}</i>",
             ]
         )

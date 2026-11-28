@@ -39,9 +39,9 @@ sudo iptables -C FORWARD -i "$BR" -o "$BR" -j ACCEPT 2>/dev/null \
 # 3. Deploy topology
 sudo "$CLAB_BIN" deploy -t topo.yml --reconfigure "$@"
 
-# 4. FRR đổi owner file cấu hình khi chạy -> trả lại quyền đọc cho user
+# 4. FRR đổi owner file cấu hình khi chạy -> trả lại quyền đọc cho user (a+rX tránh làm bẩn git mode +x cho file tĩnh)
 sudo chmod 644 config/* || true
-sudo chmod -R 755 monitoring/ app/ || true
+sudo chmod -R a+rX monitoring/ app/ || true
 
 # 5. Build frontend React nếu có npm và chưa có dist/ (dist/ đã được commit sẵn trong git)
 FE=monitoring/aiops-dashboard/frontend
@@ -61,10 +61,10 @@ for py_candidate in ".venv/bin/python" ".venv/bin/python3" "venv/bin/python" "ve
   fi
 done
 if [ -n "$PY_BIN" ]; then
-  nohup "$PY_BIN" monitoring/aiops-dashboard/backend/app.py </dev/null >/tmp/aiops_dashboard.log 2>&1 &
+  nohup "$PY_BIN" -u monitoring/aiops-dashboard/backend/app.py </dev/null >/tmp/aiops_dashboard.log 2>&1 &
 else
   USER_SITE=$(find "/home/${SUDO_USER:-$USER}/.local/lib" -maxdepth 2 -name "site-packages" 2>/dev/null | tr '\n' ':' || true)
-  PYTHONPATH="${USER_SITE}${PYTHONPATH:-}" nohup python3 monitoring/aiops-dashboard/backend/app.py </dev/null >/tmp/aiops_dashboard.log 2>&1 &
+  PYTHONPATH="${USER_SITE}${PYTHONPATH:-}" nohup python3 -u monitoring/aiops-dashboard/backend/app.py </dev/null >/tmp/aiops_dashboard.log 2>&1 &
 fi
 
 echo

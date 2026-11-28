@@ -958,6 +958,7 @@ class AIOpsStateEngine:
                                 "service": info["service"],
                                 "prev_fault": info["fault_class"],
                                 "metrics": dict(ev["metrics"]),
+                                "resolved_cycles": resolved_need,
                             },
                         )
                     )
@@ -1233,6 +1234,7 @@ class AIOpsStateEngine:
                         service=payload["service"],
                         prev_fault=payload["prev_fault"],
                         metrics=payload["metrics"],
+                        resolved_cycles=int(payload.get("resolved_cycles", 2)),
                     )
                 elif kind == "sync_pending":
                     self.notifier.sync_pending_resolved(payload["service_id"], payload["note"])
@@ -1591,10 +1593,11 @@ class AIOpsStateEngine:
     def _tg_dismiss_callback(self, service_id: str, actor: str) -> Tuple[bool, str]:
         with self._lock:
             exists = service_id in self.pending_approvals
+            cd_sec = int(getattr(self, "dismissed_cooldown_seconds", 45))
         if not exists:
             return False, "Sự cố này không còn trong hàng đợi chờ phê duyệt."
         self.dismiss_pending(service_id=service_id, actor=actor)
-        return True, f"Đã bỏ qua cảnh báo cho {service_id} (tạm ẩn 45s)."
+        return True, f"Đã bỏ qua cảnh báo cho {service_id} (tạm ẩn {cd_sec}s)."
 
     def _tg_rollback_callback(self, service_id: str, actor: str) -> Tuple[bool, str]:
         with self._lock:
@@ -1741,6 +1744,18 @@ class AIOpsStateEngine:
                 },
             )
             self.audit_logs = self.audit_logs[:30]
+            self.db.record_remediation_action(
+                result_id="settings_reset",
+                service_id="SYSTEM_SETTINGS",
+                scenario="SettingsReset",
+                trigger_mode="SETTINGS",
+                fault_class="Normal",
+                confidence="100%",
+                target_device="AIOps Command Center",
+                action_text=action_str,
+                status="READY",
+                actor=actor,
+            )
             self.notifier.apply_runtime_settings(defaults)
             state = self._patch_latest_state_unlocked()
         return {"settings": defaults, "telegram": self.notifier.get_status(), "state": state}
@@ -1754,10 +1769,18 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
         pass
 
     def _read_json_body(self) -> Dict[str, Any]:
-        length = int(self.headers.get("Content-Length", 0))
-        raw_body = self.rfile.read(length).decode("utf-8") if length > 0 else "{}"
         try:
-            return json.loads(raw_body)
+            length = int(self.headers.get("Content-Length", 0))
+        except (TypeError, ValueError):
+            length = 0
+        if length <= 0:
+            return {}
+        # Giới hạn kích thước payload JSON tối đa 1 MB để tránh lạm dụng bộ nhớ
+        length = min(length, 1_048_576)
+        raw_body = self.rfile.read(length).decode("utf-8", errors="replace")
+        try:
+            parsed = json.loads(raw_body)
+            return parsed if isinstance(parsed, dict) else {}
         except Exception:
             return {}
 
@@ -1772,12 +1795,19 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
 
     def _is_local_request(self) -> bool:
         """Kiểm tra request có đến từ localhost (để scripts/verify.sh không bị chặn)."""
-        return self.client_address[0] in ("127.0.0.1", "::1")
+        return self.client_address[0] in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+
+    def _is_alertmanager_source(self) -> bool:
+        """Chỉ chấp nhận webhook /alerts từ mạng quản lý OOB (172.20.20.0/24 — Alertmanager .52) hoặc localhost."""
+        ip = self.client_address[0]
+        if ip.startswith("::ffff:"):
+            ip = ip[7:]
+        return ip in ("127.0.0.1", "::1") or ip.startswith("172.20.20.")
 
     def _require_auth(self, admin_only: bool = False) -> Dict[str, Any] | None:
         """
         Xác thực Bearer Token kết hợp đối chiếu trực tiếp RAM cache `Users` (< 0.05ms):
-        - Tài khoản bị xóa / đổi mật khẩu / bị khóa (LOCKED) bị chặn ngay lập tức.
+        - Tài khoản bị xóa / đổi mật khẩu / bị khóa (LOCKED) bị thu hồi phiên (401) ngay lập tức.
         - Vai trò (role) và họ tên (full_name) luôn phản ánh trạng thái mới nhất.
         """
         token = extract_bearer_token(self.headers)
@@ -1798,7 +1828,7 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
             return None
 
         if str(live_doc.get("status", "ACTIVE")).upper() == "LOCKED":
-            self._send_json({"error": "Tài khoản đã bị khóa bởi quản trị viên"}, status=403)
+            self._send_json({"error": "Tài khoản đã bị khóa bởi quản trị viên"}, status=401)
             return None
 
         live_user = ENGINE.db._public_user(live_doc)
@@ -1965,7 +1995,10 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
             return
         
         elif self.path == "/alerts":
-            # Nhận webhook hạ tầng từ Alertmanager (172.20.20.52) hoặc localhost (không chặn bởi auth Web)
+            # Chỉ cho phép Alertmanager (mạng OOB 172.20.20.0/24), localhost, hoặc ADMIN có token hợp lệ
+            if not self._is_alertmanager_source():
+                if not self._require_auth(admin_only=True):
+                    return
             processed = ENGINE.process_alertmanager_webhook(body)
             self._send_json({"status": "ok", "processed": processed})
             return
@@ -1978,14 +2011,23 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
         actor = f"{user['username']} (Web)"
 
         if self.path == "/api/policy":
+            thr_val: Optional[float] = None
+            if "threshold" in body and body["threshold"] is not None:
+                try:
+                    thr_val = float(body["threshold"])
+                except (TypeError, ValueError):
+                    self._send_json({"error": "Ngưỡng dự báo phải là số hợp lệ (40 – 90%)"}, status=400)
+                    return
+                if thr_val < 40.0 or thr_val > 90.0:
+                    self._send_json({"error": "Ngưỡng dự báo 5 phút phải nằm trong khoảng 40 – 90%"}, status=400)
+                    return
+            auto_val = bool(body["auto_pilot"]) if "auto_pilot" in body else None
             with ENGINE._lock:
-                if "threshold" in body:
-                    ENGINE.forecast_threshold = float(body["threshold"]) / 100.0
-                if "auto_pilot" in body:
-                    ENGINE.auto_pilot = bool(body["auto_pilot"])
-                ENGINE.db.update_policy_rule(
-                    threshold_pct=body.get("threshold"), auto_pilot=body.get("auto_pilot")
-                )
+                if thr_val is not None:
+                    ENGINE.forecast_threshold = thr_val / 100.0
+                if auto_val is not None:
+                    ENGINE.auto_pilot = auto_val
+                ENGINE.db.update_policy_rule(threshold_pct=thr_val, auto_pilot=auto_val)
                 state = ENGINE._patch_latest_state_unlocked()
             self._send_json(state)
 
@@ -2013,10 +2055,14 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(res)
         
         elif self.path.startswith("/api/services"):
-            with ENGINE._lock:
-                ENGINE.db.create_service(body)
-                services_snap = [dict(s) for s in ENGINE.db.services_cache]
-                state = ENGINE._patch_latest_state_unlocked()
+            try:
+                with ENGINE._lock:
+                    ENGINE.db.create_service(body)
+                    services_snap = [dict(s) for s in ENGINE.db.services_cache]
+                    state = ENGINE._patch_latest_state_unlocked()
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, status=400)
+                return
             if ENGINE.lab_running and ENGINE.dataplane_ready:
                 threading.Thread(
                     target=ENGINE.collector.ensure_services_registered,
@@ -2044,12 +2090,19 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
             if not self._require_auth(admin_only=True):
                 return
             
-            parts = self.path.rstrip("/").split("/")
-            sid = parts[3] if len(parts) > 3 else str(body.get("service_id", ""))
-            with ENGINE._lock:
-                ENGINE.db.update_service(sid, body)
-                services_snap = [dict(s) for s in ENGINE.db.services_cache]
-                state = ENGINE._patch_latest_state_unlocked()
+            parts = self.path.split("?", 1)[0].rstrip("/").split("/")
+            sid = urllib.parse.unquote(parts[3]) if len(parts) > 3 else str(body.get("service_id", ""))
+            try:
+                with ENGINE._lock:
+                    updated = ENGINE.db.update_service(sid, body)
+                    if updated is None:
+                        self._send_json({"error": f"Không tìm thấy dịch vụ '{sid}'"}, status=404)
+                        return
+                    services_snap = [dict(s) for s in ENGINE.db.services_cache]
+                    state = ENGINE._patch_latest_state_unlocked()
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, status=400)
+                return
             if ENGINE.lab_running and ENGINE.dataplane_ready:
                 threading.Thread(
                     target=ENGINE.collector.ensure_services_registered,
@@ -2088,19 +2141,46 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         body = self._read_json_body()
         if self.path.startswith("/api/services"):
-
-            if not self._require_auth(admin_only=True):
+            user = self._require_auth(admin_only=True)
+            if not user:
                 return
-            
-            parts = self.path.rstrip("/").split("/")
-            sid = parts[3] if len(parts) > 3 else str(body.get("service_id", ""))
+            actor = f"{user['username']} (Web)"
+            parts = self.path.split("?", 1)[0].rstrip("/").split("/")
+            sid = urllib.parse.unquote(parts[3]) if len(parts) > 3 else str(body.get("service_id", ""))
+            removed_rule: Optional[Dict[str, Any]] = None
+            remaining_rules: List[Dict[str, Any]] = []
+            had_pending = False
             with ENGINE._lock:
-                ENGINE.db.delete_service(sid)
+                deleted = ENGINE.db.delete_service(sid)
+                if not deleted:
+                    self._send_json(
+                        {"error": "Không thể xóa dịch vụ (phải giữ tối thiểu 1 dịch vụ hoặc không tìm thấy)"},
+                        status=400,
+                    )
+                    return
                 ENGINE.service_windows.pop(sid, None)
                 ENGINE.service_score_windows.pop(sid, None)
-                ENGINE.active_service_rules.pop(sid, None)
-                ENGINE.pending_approvals.pop(sid, None)
+                removed_rule = ENGINE.active_service_rules.pop(sid, None)
+                remaining_rules = list(ENGINE.active_service_rules.values())
+                had_pending = ENGINE.pending_approvals.pop(sid, None) is not None
+                ENGINE.alerted_services.pop(sid, None)
+                ENGINE.incident_cooldown.pop(sid, None)
+                ENGINE.dismissed_cooldown.pop(sid, None)
                 state = ENGINE._patch_latest_state_unlocked()
+            # Nếu dịch vụ vừa xóa đang có luật chặn iptables -> gỡ sạch luật khỏi container NGOÀI lock
+            if removed_rule is not None:
+                threading.Thread(
+                    target=execute_service_rollback,
+                    args=(removed_rule,),
+                    kwargs={"remaining_rules": remaining_rules},
+                    daemon=True,
+                ).start()
+                ENGINE.notifier.sync_rule_rolled_back(sid, actor)
+            if had_pending:
+                ENGINE.notifier.sync_pending_resolved(
+                    sid,
+                    f"🗑️ Dịch vụ đã được xóa bởi {actor} lúc {datetime.now().strftime('%H:%M:%S')}",
+                )
             self._send_json(state)
         
         elif self.path.startswith("/api/users"):

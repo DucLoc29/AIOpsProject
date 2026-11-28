@@ -12,6 +12,7 @@ Quản lý 6 Bảng (Collections) chuẩn trong database `AIOpsProject`:
   6. `Users`              : Tài khoản đăng nhập & phân quyền RBAC (`ADMIN` / `VIEWER`, trạng thái `ACTIVE` / `LOCKED`)
 """
 
+import ipaddress
 import os
 import re
 import threading
@@ -309,32 +310,57 @@ class AIOpsDatabase:
     # =========================================================================
     # CRUD SERVICES (THÊM / SỬA / XÓA DỊCH VỤ ĐỘNG)
     # =========================================================================
+    @staticmethod
+    def _validate_service_endpoint(address: str, port_raw: Any) -> Tuple[str, int]:
+        addr = str(address or "").strip()
+        if not addr:
+            raise ValueError("Địa chỉ IP/Hostname dịch vụ không được để trống")
+        try:
+            ipaddress.ip_address(addr)
+        except ValueError:
+            if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9.-]{0,126}[a-zA-Z0-9]$", addr):
+                raise ValueError(f"Địa chỉ IP/Hostname không hợp lệ: '{addr}'")
+
+        try:
+            port = int(port_raw)
+        except (TypeError, ValueError):
+            raise ValueError("Cổng dịch vụ (port) phải là số nguyên hợp lệ")
+        if port < 1 or port > 65535:
+            raise ValueError("Cổng dịch vụ (port) phải nằm trong khoảng 1 – 65535")
+        return addr, port
+
     def create_service(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        raw_name = str(payload.get("service_name", "New Service")).strip() or "New Service"
+        raw_name = str(payload.get("service_name", "New Service")).strip()[:120] or "New Service"
         raw_id = str(payload.get("service_id", "")).strip()
-        if not raw_id:
-            slug = re.sub(r"[^a-z0-9]+", "_", raw_name.lower()).strip("_")[:18]
+        if raw_id:
+            if not re.match(r"^[a-zA-Z0-9_.-]{2,64}$", raw_id):
+                raise ValueError("service_id chỉ được chứa chữ cái, số và ký tự _, ., - (2–64 ký tự)")
+        else:
+            slug = re.sub(r"[^a-z0-9]+", "_", raw_name.lower()).strip("_")[:18] or "service"
             raw_id = f"srv_{slug}_{datetime.now().strftime('%H%M%S')}"
 
-        addr = str(payload.get("address", "192.168.10.10")).strip() or "192.168.10.10"
-        port = int(payload.get("port", 8080) or 8080)
-        stype = str(payload.get("service_type", "HTTP")).strip().upper() or "HTTP"
+        addr_in = payload.get("address", "192.168.10.10")
+        port_in = payload.get("port", 8080)
+        if port_in in ("", None):
+            port_in = 8080
+        addr, port = self._validate_service_endpoint(str(addr_in or "192.168.10.10"), port_in)
+        stype = str(payload.get("service_type", "HTTP")).strip().upper()[:24] or "HTTP"
         default_host, default_oob = IP_TO_OOB.get(addr, ("service-server", "172.20.20.21"))
 
         new_doc: Dict[str, Any] = {
             "service_id": raw_id,
             "service_name": raw_name,
             "service_type": stype,
-            "host_node": str(payload.get("host_node", default_host)).strip() or default_host,
-            "zone": str(payload.get("zone", "HQ_SERVER_FARM (Custom Service)")).strip(),
+            "host_node": str(payload.get("host_node", default_host)).strip()[:64] or default_host,
+            "zone": str(payload.get("zone", "HQ_SERVER_FARM (Custom Service)")).strip()[:80],
             "address": addr,
-            "oob_ip": str(payload.get("oob_ip", default_oob)).strip() or default_oob,
+            "oob_ip": str(payload.get("oob_ip", default_oob)).strip()[:64] or default_oob,
             "port": port,
-            "check_interval": str(payload.get("check_interval", "2s")).strip() or "2s",
+            "check_interval": str(payload.get("check_interval", "2s")).strip()[:16] or "2s",
             "status": "NORMAL",
             "description": str(
                 payload.get("description", f"Dịch vụ {stype} vận hành tại {addr}:{port}")
-            ).strip(),
+            ).strip()[:300],
         }
 
         # Tránh trùng service_id
@@ -361,21 +387,25 @@ class AIOpsDatabase:
         if target is None:
             return None
 
-        addr = str(payload.get("address", target["address"])).strip() or target["address"]
+        addr_in = payload.get("address", target["address"])
+        port_in = payload.get("port", target["port"])
+        if port_in in ("", None):
+            port_in = target["port"]
+        addr, port = self._validate_service_endpoint(str(addr_in or target["address"]), port_in)
         default_host, default_oob = IP_TO_OOB.get(
             addr, (target.get("host_node", "service-server"), target.get("oob_ip", "172.20.20.21"))
         )
 
         updates = {
-            "service_name": str(payload.get("service_name", target["service_name"])).strip(),
-            "service_type": str(payload.get("service_type", target["service_type"])).strip().upper(),
+            "service_name": str(payload.get("service_name", target["service_name"])).strip()[:120] or target["service_name"],
+            "service_type": str(payload.get("service_type", target["service_type"])).strip().upper()[:24] or target["service_type"],
             "address": addr,
-            "port": int(payload.get("port", target["port"]) or target["port"]),
-            "host_node": str(payload.get("host_node", default_host)).strip() or default_host,
-            "oob_ip": str(payload.get("oob_ip", default_oob)).strip() or default_oob,
-            "zone": str(payload.get("zone", target.get("zone", "HQ_SERVER_FARM"))).strip(),
-            "check_interval": str(payload.get("check_interval", target.get("check_interval", "2s"))).strip(),
-            "description": str(payload.get("description", target.get("description", ""))).strip(),
+            "port": port,
+            "host_node": str(payload.get("host_node", default_host)).strip()[:64] or default_host,
+            "oob_ip": str(payload.get("oob_ip", default_oob)).strip()[:64] or default_oob,
+            "zone": str(payload.get("zone", target.get("zone", "HQ_SERVER_FARM"))).strip()[:80],
+            "check_interval": str(payload.get("check_interval", target.get("check_interval", "2s"))).strip()[:16],
+            "description": str(payload.get("description", target.get("description", ""))).strip()[:300],
         }
         target.update(updates)
 
