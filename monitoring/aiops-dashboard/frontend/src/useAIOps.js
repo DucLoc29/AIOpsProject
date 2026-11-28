@@ -131,7 +131,7 @@ export function useAIOps(intervalMs = 2000) {
     setPolicy: (payload) => act(() => api.setPolicy(payload)),
     approve: (service_id) => act(() => api.approve(service_id)),
     dismiss: (service_id) => act(() => api.dismiss(service_id)),
-    rollback: (service_id) => act(() => api.rollback(service_id)),
+    rollback: (service_id, fault_class) => act(() => api.rollback(service_id, fault_class)),
     testTelegram: () => api.testTelegram(),
     getSettings: () => api.getSettings(),
     updateSettings: async (payload) => {

@@ -3,13 +3,14 @@
 Tầng Cơ sở dữ liệu MongoDB Atlas (Cloud Database) cho AIOps Command Center.
 Hỗ trợ đầy đủ CRUD (Thêm / Sửa / Xóa) cho bảng `Services` đồng bộ trực tiếp lên MongoDB Atlas.
 
-Quản lý 6 Bảng (Collections) chuẩn trong database `AIOpsProject`:
+Quản lý 7 Bảng (Collections) chuẩn trong database `AIOpsProject`:
   1. `Services`           : Danh mục các Dịch vụ ứng dụng doanh nghiệp (Hỗ trợ CRUD Thêm / Sửa / Xóa động)
-  2. `AlertRules`         : Cấu hình luật cảnh báo & ngưỡng điều phối hệ thống AI (Policy Gate)
-  3. `AIResults`          : Kết quả suy luận AI (Model 1 4-mức -> Dự báo 5m 4-mức -> Model 2 RCA) theo từng Service
-  4. `Alerts`             : Cảnh báo sự cố chính thức của từng Service
-  5. `RemediationActions` : Nhật ký câu lệnh tự động ứng phó khép kín theo IP:Port & Rollback từng dịch vụ
-  6. `Users`              : Tài khoản đăng nhập & phân quyền RBAC (`ADMIN` / `VIEWER`, trạng thái `ACTIVE` / `LOCKED`)
+  2. `AlertRules`         : Luật cảnh báo & chính sách ngưỡng AI (Global Policy Gate & Rule riêng theo từng Service)
+  3. `SystemSettings`     : Cấu hình vận hành toàn hệ thống (Leo thang L1->L2->L3, Cooldown, Telegram ChatOps, UI Polling)
+  4. `AIResults`          : Kết quả suy luận AI (Model 1 4-mức -> Dự báo 5m 4-mức -> Model 2 RCA) theo từng Service
+  5. `Alerts`             : Cảnh báo sự cố chính thức của từng Service (AI & Hạ tầng Alertmanager)
+  6. `RemediationActions` : Nhật ký câu lệnh tự động ứng phó khép kín theo IP:Port & Rollback từng dịch vụ
+  7. `Users`              : Tài khoản đăng nhập & phân quyền RBAC (`ADMIN` / `VIEWER`, trạng thái `ACTIVE` / `LOCKED`)
 """
 
 import ipaddress
@@ -95,6 +96,7 @@ DEFAULT_SERVICES: List[Dict[str, Any]] = [
 DEFAULT_ALERT_RULES: List[Dict[str, Any]] = [
     {
         "rule_id": "rule_ai_policy_gate",
+        "rule_type": "GLOBAL_POLICY_GATE",
         "service_id": "ALL_SERVER_SERVICES",
         "metric_name": "m2_forecast_5m_prob",
         "threshold_value": 60.0,
@@ -102,53 +104,18 @@ DEFAULT_ALERT_RULES: List[Dict[str, Any]] = [
         "severity": "critical",
         "auto_remediate": True,
         "is_active": True,
-        "description": "Ngưỡng dự báo suy giảm dịch vụ 5 phút tới (Mức HIGH/CRITICAL >= 60%) để kích hoạt Model 2 (RCA)",
-    },
-    {
-        "rule_id": "rule_web_syn_flood",
-        "service_id": "srv_web_portal",
-        "metric_name": "packet_loss",
-        "threshold_value": 5.0,
-        "comparison_operator": ">",
-        "severity": "critical",
-        "auto_remediate": True,
-        "is_active": True,
-        "description": "Cảnh báo dịch vụ Web Portal (:80) bị SYN Flood -> Chặn gói SYN vào đúng 192.168.10.10:80",
-    },
-    {
-        "rule_id": "rule_api_http_flood",
-        "service_id": "srv_flask_api",
-        "metric_name": "response_time",
-        "threshold_value": 80.0,
-        "comparison_operator": ">",
-        "severity": "critical",
-        "auto_remediate": True,
-        "is_active": True,
-        "description": "Cảnh báo Flask REST API (:5000) & Web (:80) bị HTTP Flood -> Chặn IP tấn công theo cổng đích",
-    },
-    {
-        "rule_id": "rule_ssh_bruteforce",
-        "service_id": "srv_ssh_access",
-        "metric_name": "response_time",
-        "threshold_value": 60.0,
-        "comparison_operator": ">",
-        "severity": "critical",
-        "auto_remediate": True,
-        "is_active": True,
-        "description": "Cảnh báo dịch vụ Remote SSH (:22) bị Brute-force -> Chặn riêng cổng :22 tại Firewall",
-    },
-    {
-        "rule_id": "rule_insider_portscan",
-        "service_id": "srv_ssh_access",
-        "metric_name": "tcp_rst_rate",
-        "threshold_value": 30.0,
-        "comparison_operator": ">",
-        "severity": "high",
-        "auto_remediate": True,
-        "is_active": True,
-        "description": "Cảnh báo quét cổng nội bộ LAN (PortScan) -> Cô lập IP quét theo cổng dịch vụ tại máy chủ",
+        "description": "Chính sách AI mặc định toàn cục (Policy Gate: Dự báo 5m >= ngưỡng để kích hoạt Model 2 RCA)",
     },
 ]
+
+LEGACY_STATIC_RULE_IDS = {
+    "rule_web_syn_flood",
+    "rule_api_http_flood",
+    "rule_ssh_bruteforce",
+    "rule_insider_portscan",
+}
+
+VALID_RESPONSE_MODES = ("INHERIT", "AUTO_PILOT", "HUMAN_APPROVAL")
 
 IP_TO_OOB = {
     "192.168.10.10": ("service-server", "172.20.20.21"),
@@ -166,13 +133,33 @@ def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, val))
 
 
-def build_default_system_settings() -> Dict[str, Any]:
-    """Tham số vận hành mặc định (nạp khởi tạo từ .env, có thể tinh chỉnh nóng trên trang Cài đặt chung)."""
+DEFAULT_AI_THRESHOLDS: Dict[str, float] = {
+    "m1_threshold_medium": 0.5451,
+    "m1_threshold_high": 0.6061,
+    "m1_threshold_critical": 0.6709,
+    "forecast_threshold_pct": 60.0,
+    "forecast_critical_pct": 80.0,
+    "m2_confidence_threshold_pct": 70.0,
+}
+
+
+def build_default_system_settings(ai_defaults: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
+    """Tham số vận hành mặc định (nạp khởi tạo từ .env & ngưỡng hiệu chuẩn .pkl, tinh chỉnh nóng trên Cài đặt chung)."""
     l2 = _env_int("ESCALATION_L2_SECONDS", 30, 5, 600)
     l3 = max(l2 + 5, _env_int("ESCALATION_L3_SECONDS", 60, 10, 1800))
+    ai_d = dict(DEFAULT_AI_THRESHOLDS)
+    if isinstance(ai_defaults, dict):
+        for k in DEFAULT_AI_THRESHOLDS:
+            if k in ai_defaults and ai_defaults[k] is not None:
+                ai_d[k] = float(ai_defaults[k])
     return {
         "auto_pilot": True,
-        "forecast_threshold_pct": 60.0,
+        "m1_threshold_medium": round(ai_d["m1_threshold_medium"], 4),
+        "m1_threshold_high": round(ai_d["m1_threshold_high"], 4),
+        "m1_threshold_critical": round(ai_d["m1_threshold_critical"], 4),
+        "forecast_threshold_pct": round(ai_d["forecast_threshold_pct"], 1),
+        "forecast_critical_pct": round(ai_d["forecast_critical_pct"], 1),
+        "m2_confidence_threshold_pct": round(ai_d["m2_confidence_threshold_pct"], 1),
         "escalation_l2_seconds": l2,
         "escalation_l3_seconds": l3,
         "l3_auto_mitigate": True,
@@ -216,9 +203,9 @@ def build_default_users() -> List[Dict[str, Any]]:
     ]
 
 class AIOpsDatabase:
-    """Quản lý kết nối MongoDB Atlas (6 bảng) kèm CRUD Services & Users + bộ nhớ đệm an toàn."""
+    """Quản lý kết nối MongoDB Atlas (7 bảng + index chuẩn) kèm CRUD Services & Users + bộ nhớ đệm an toàn."""
 
-    def __init__(self) -> None:
+    def __init__(self, ai_defaults: Optional[Dict[str, float]] = None) -> None:
         load_env_file()
         self.mongo_uri = os.environ.get("MONGO_URI", "")
         self.db_name = os.environ.get("MONGO_DB_NAME", "AIOpsProject")
@@ -226,17 +213,24 @@ class AIOpsDatabase:
         self.status_message = "Chưa kết nối MongoDB"
         self.client: Any = None
         self.db: Any = None
+        self.ai_defaults: Dict[str, float] = dict(DEFAULT_AI_THRESHOLDS)
+        if isinstance(ai_defaults, dict):
+            for k in DEFAULT_AI_THRESHOLDS:
+                if k in ai_defaults and ai_defaults[k] is not None:
+                    self.ai_defaults[k] = float(ai_defaults[k])
 
         self.services_cache: List[Dict[str, Any]] = [dict(s) for s in DEFAULT_SERVICES]
         self.rules_cache: List[Dict[str, Any]] = [dict(r) for r in DEFAULT_ALERT_RULES]
+        self.service_alert_rules: Dict[str, Dict[str, Any]] = {}
         self.ai_results_cache: List[Dict[str, Any]] = []
         self.alerts_cache: List[Dict[str, Any]] = []
         self.remediations_cache: List[Dict[str, Any]] = []
         self.users_cache: List[Dict[str, Any]] = build_default_users()
-        self.system_settings: Dict[str, Any] = build_default_system_settings()
+        self.system_settings: Dict[str, Any] = build_default_system_settings(self.ai_defaults)
         self.counts: Dict[str, int] = {
             "Services": len(self.services_cache),
             "AlertRules": len(self.rules_cache),
+            "SystemSettings": 1,
             "AIResults": 0,
             "Alerts": 0,
             "RemediationActions": 0,
@@ -274,7 +268,15 @@ class AIOpsDatabase:
             print(f"[✓] Đã kết nối thành công tới MongoDB Atlas: {self.db_name}")
 
             existing_cols = set(self.db.list_collection_names())
-            for col_name in ("Services", "AlertRules", "AIResults", "Alerts", "RemediationActions", "Users"):
+            for col_name in (
+                "Services",
+                "AlertRules",
+                "SystemSettings",
+                "AIResults",
+                "Alerts",
+                "RemediationActions",
+                "Users",
+            ):
                 if col_name not in existing_cols:
                     self.db.create_collection(col_name)
 
@@ -289,23 +291,71 @@ class AIOpsDatabase:
                     self.db["Services"].insert_many([dict(s) for s in DEFAULT_SERVICES])
                     print("    -> Đã khởi tạo bảng 'Services' trên MongoDB Atlas")
 
-            expected_rule_ids = {r["rule_id"] for r in DEFAULT_ALERT_RULES}
-            current_rule_ids = {
-                doc.get("rule_id") for doc in self.db["AlertRules"].find({}, {"rule_id": 1})
-            }
-            if not expected_rule_ids.issubset(current_rule_ids):
-                self.db["AlertRules"].delete_many({"rule_id": {"$ne": "rule_system_settings"}})
-                self.db["AlertRules"].insert_many([dict(r) for r in DEFAULT_ALERT_RULES])
+            # Dọn 4 bản ghi mô tả tĩnh cũ (không thực thi) nếu còn tồn tại
+            self.db["AlertRules"].delete_many({"rule_id": {"$in": list(LEGACY_STATIC_RULE_IDS)}})
+            if self.db["AlertRules"].count_documents({"rule_id": "rule_ai_policy_gate"}) == 0:
+                self.db["AlertRules"].insert_one(dict(DEFAULT_ALERT_RULES[0]))
+
+            # Tự động chuyển (migrate) cấu hình hệ thống từ AlertRules sang collection riêng SystemSettings (không mất dữ liệu)
+            legacy_settings_doc = self.db["AlertRules"].find_one({"rule_id": "rule_system_settings"}, {"_id": 0})
+            if self.db["SystemSettings"].count_documents({"setting_id": "global_system_settings"}) == 0:
+                if legacy_settings_doc and isinstance(legacy_settings_doc.get("settings"), dict):
+                    self.db["SystemSettings"].insert_one(
+                        {
+                            "setting_id": "global_system_settings",
+                            "settings": dict(legacy_settings_doc["settings"]),
+                            "updated_at": legacy_settings_doc.get(
+                                "updated_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            ),
+                        }
+                    )
+                    print("    -> Đã chuyển cấu hình hệ thống sang bảng riêng 'SystemSettings'")
+                else:
+                    self.db["SystemSettings"].insert_one(
+                        {
+                            "setting_id": "global_system_settings",
+                            "settings": build_default_system_settings(self.ai_defaults),
+                            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        }
+                    )
+                    print("    -> Đã khởi tạo bảng 'SystemSettings' trên MongoDB Atlas")
+            if legacy_settings_doc is not None:
+                self.db["AlertRules"].delete_many({"rule_id": "rule_system_settings"})
 
             if self.db["Users"].count_documents({}) == 0:
                 self.db["Users"].insert_many([dict(u) for u in self.users_cache])
                 print(" -> Đã khởi tạo bảng 'Users' (admin / viewer) trên MongoDB Atlas")
-            
+
+            self._ensure_indexes()
             self._refresh_caches()
         except Exception as exc:
             self.connected = False
             self.status_message = f"Lỗi kết nối MongoDB ({type(exc).__name__}) - Chạy Local Fallback"
             print(f"[!] Không thể kết nối MongoDB Atlas: {exc}")
+
+    def _ensure_indexes(self) -> None:
+        """Tạo các Unique Index & Compound Index chuẩn cho 7 collections để tối ưu truy vấn và toàn vẹn dữ liệu."""
+        if not self.connected or self.db is None:
+            return
+        index_specs = [
+            ("Users", [("username", 1)], {"unique": True, "name": "idx_users_username_unique"}),
+            ("Services", [("service_id", 1)], {"unique": True, "name": "idx_services_id_unique"}),
+            ("AlertRules", [("rule_id", 1)], {"unique": True, "name": "idx_alertrules_id_unique"}),
+            ("AlertRules", [("service_id", 1)], {"name": "idx_alertrules_service_id"}),
+            ("SystemSettings", [("setting_id", 1)], {"unique": True, "name": "idx_systemsettings_id_unique"}),
+            ("AIResults", [("timestamp", -1)], {"name": "idx_airesults_ts_desc"}),
+            ("AIResults", [("service_id", 1), ("timestamp", -1)], {"name": "idx_airesults_svc_ts"}),
+            ("Alerts", [("created_at", -1)], {"name": "idx_alerts_created_desc"}),
+            ("Alerts", [("service_id", 1), ("created_at", -1)], {"name": "idx_alerts_svc_created"}),
+            ("Alerts", [("status", 1), ("created_at", -1)], {"name": "idx_alerts_status_created"}),
+            ("RemediationActions", [("timestamp", -1)], {"name": "idx_remediations_ts_desc"}),
+            ("RemediationActions", [("service_id", 1), ("timestamp", -1)], {"name": "idx_remediations_svc_ts"}),
+        ]
+        for col_name, keys, opts in index_specs:
+            try:
+                self.db[col_name].create_index(keys, **opts)
+            except Exception:
+                pass
 
     # =========================================================================
     # CRUD SERVICES (THÊM / SỬA / XÓA DỊCH VỤ ĐỘNG)
@@ -424,6 +474,7 @@ class AIOpsDatabase:
         before = len(self.services_cache)
         self.services_cache = [s for s in self.services_cache if s["service_id"] != service_id]
         self.counts["Services"] = len(self.services_cache)
+        self.delete_service_alert_rule(service_id)
 
         if self.connected and self.db is not None:
             self._run_async(lambda: self.db["Services"].delete_one({"service_id": service_id}))
@@ -478,12 +529,19 @@ class AIOpsDatabase:
                     merged_services.append(s)
                 self.services_cache = merged_services
             all_rules = list(self.db["AlertRules"].find({}, {"_id": 0}))
-            settings_doc = next((r for r in all_rules if r.get("rule_id") == "rule_system_settings"), None)
+            settings_doc = self.db["SystemSettings"].find_one(
+                {"setting_id": "global_system_settings"}, {"_id": 0}
+            )
+            if settings_doc is None:
+                settings_doc = next((r for r in all_rules if r.get("rule_id") == "rule_system_settings"), None)
             self.rules_cache = [
-                r for r in all_rules if r.get("rule_id") != "rule_system_settings"
+                r
+                for r in all_rules
+                if r.get("rule_id") != "rule_system_settings"
+                and r.get("rule_id") not in LEGACY_STATIC_RULE_IDS
             ] or [dict(r) for r in DEFAULT_ALERT_RULES]
 
-            merged_settings = build_default_system_settings()
+            merged_settings = build_default_system_settings(self.ai_defaults)
             policy_cfg = self.get_policy_config()
             merged_settings["auto_pilot"] = bool(policy_cfg.get("auto_pilot", True))
             merged_settings["forecast_threshold_pct"] = float(policy_cfg.get("threshold_pct", 60.0))
@@ -497,14 +555,27 @@ class AIOpsDatabase:
                         continue
                     merged_settings[k] = v
             self.system_settings = merged_settings
+
+            loaded_srv_rules: Dict[str, Dict[str, Any]] = {}
+            for r in all_rules:
+                if r.get("rule_type") == "SERVICE_AI_POLICY" or str(r.get("rule_id", "")).startswith("rule_srv_"):
+                    sid = str(r.get("service_id", "")).strip()
+                    if sid:
+                        r_norm_in = dict(r)
+                        if str(r_norm_in.get("response_mode", "")).upper() == "ALERT_ONLY":
+                            r_norm_in["response_mode"] = "HUMAN_APPROVAL"
+                        norm, err = self._validate_service_alert_rule(sid, r_norm_in, self.system_settings)
+                        if norm and not err:
+                            loaded_srv_rules[sid] = norm
+            self.service_alert_rules = loaded_srv_rules
             self.ai_results_cache = list(
-                self.db["AIResults"].find({}, {"_id": 0}).sort("timestamp", -1).limit(15)
+                self.db["AIResults"].find({}, {"_id": 0}).sort("timestamp", -1).limit(200)
             )
             self.alerts_cache = list(
-                self.db["Alerts"].find({}, {"_id": 0}).sort("created_at", -1).limit(15)
+                self.db["Alerts"].find({}, {"_id": 0}).sort("created_at", -1).limit(200)
             )
             self.remediations_cache = list(
-                self.db["RemediationActions"].find({}, {"_id": 0}).sort("timestamp", -1).limit(15)
+                self.db["RemediationActions"].find({}, {"_id": 0}).sort("timestamp", -1).limit(200)
             )
             
             db_users = list(self.db["Users"].find({}, {"_id": 0}))
@@ -518,6 +589,7 @@ class AIOpsDatabase:
             self.counts = {
                 "Services": len(self.services_cache),
                 "AlertRules": len(self.rules_cache),
+                "SystemSettings": self.db["SystemSettings"].count_documents({}),
                 "AIResults": self.db["AIResults"].count_documents({}),
                 "Alerts": self.db["Alerts"].count_documents({}),
                 "RemediationActions": self.db["RemediationActions"].count_documents({}),
@@ -734,7 +806,10 @@ class AIOpsDatabase:
                     r["auto_remediate"] = bool(auto_pilot)
 
         if threshold_pct is not None:
-            self.system_settings["forecast_threshold_pct"] = round(float(threshold_pct), 1)
+            thr_val = round(float(threshold_pct), 1)
+            self.system_settings["forecast_threshold_pct"] = thr_val
+            if float(self.system_settings.get("forecast_critical_pct", 80.0)) < thr_val + 5.0:
+                self.system_settings["forecast_critical_pct"] = round(min(98.0, thr_val + 5.0), 1)
         if auto_pilot is not None:
             self.system_settings["auto_pilot"] = bool(auto_pilot)
 
@@ -752,11 +827,11 @@ class AIOpsDatabase:
                         self.db["AlertRules"].update_one(
                             {"rule_id": "rule_ai_policy_gate"}, {"$set": uf_copy}, upsert=True
                         ),
-                        self.db["AlertRules"].update_one(
-                            {"rule_id": "rule_system_settings"},
+                        self.db["SystemSettings"].update_one(
+                            {"setting_id": "global_system_settings"},
                             {
                                 "$set": {
-                                    "rule_id": "rule_system_settings",
+                                    "setting_id": "global_system_settings",
                                     "settings": settings_copy,
                                     "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                 }
@@ -765,6 +840,152 @@ class AIOpsDatabase:
                         ),
                     )
                 )
+
+    def _sync_rules_cache_from_memory(self) -> None:
+        """Đồng bộ danh sách rules_cache (Global Policy Gate + các AlertRule riêng theo dịch vụ)."""
+        global_rule = next(
+            (r for r in self.rules_cache if r.get("rule_id") == "rule_ai_policy_gate"),
+            dict(DEFAULT_ALERT_RULES[0]),
+        )
+        self.rules_cache = [global_rule] + [dict(r) for r in self.service_alert_rules.values()]
+        self.counts["AlertRules"] = len(self.rules_cache)
+
+    @staticmethod
+    def _validate_service_alert_rule(
+        service_id: str,
+        payload: Dict[str, Any],
+        base_settings: Dict[str, Any],
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        if not isinstance(payload, dict):
+            return None, f"Dữ liệu AlertRule của '{service_id}' không hợp lệ"
+
+        def _pnum(key: str, lo: float, hi: float, label: str):
+            raw = payload.get(key, base_settings.get(key))
+            try:
+                val = float(raw)
+            except (TypeError, ValueError):
+                return None, f"[{service_id}] {label} phải là số hợp lệ"
+            if val < lo or val > hi:
+                return None, f"[{service_id}] {label} phải nằm trong khoảng {lo} – {hi}"
+            return val, None
+
+        m1_med, err = _pnum("m1_threshold_medium", 0.35, 0.85, "Model 1 · Ngưỡng MEDIUM")
+        if err:
+            return None, err
+        m1_high, err = _pnum("m1_threshold_high", 0.40, 0.88, "Model 1 · Ngưỡng HIGH")
+        if err:
+            return None, err
+        m1_crit, err = _pnum("m1_threshold_critical", 0.45, 0.95, "Model 1 · Ngưỡng CRITICAL")
+        if err:
+            return None, err
+        if m1_high < m1_med + 0.01:
+            return None, f"[{service_id}] Model 1 · Ngưỡng HIGH ({m1_high:.4f}) phải lớn hơn MEDIUM ({m1_med:.4f}) ít nhất 0.01"
+        if m1_crit < m1_high + 0.01:
+            return None, f"[{service_id}] Model 1 · Ngưỡng CRITICAL ({m1_crit:.4f}) phải lớn hơn HIGH ({m1_high:.4f}) ít nhất 0.01"
+
+        fc_thr, err = _pnum("forecast_threshold_pct", 40.0, 90.0, "Dự báo 5m · Kích hoạt M2 (%)")
+        if err:
+            return None, err
+        fc_crit, err = _pnum("forecast_critical_pct", 55.0, 98.0, "Dự báo 5m · Ngưỡng CRITICAL (%)")
+        if err:
+            return None, err
+        if fc_crit < fc_thr + 5.0:
+            return None, f"[{service_id}] Dự báo 5m · Ngưỡng CRITICAL ({fc_crit:.1f}%) phải lớn hơn ngưỡng kích hoạt ({fc_thr:.1f}%) ít nhất 5%"
+
+        m2_conf, err = _pnum("m2_confidence_threshold_pct", 50.0, 95.0, "Model 2 RCA · Tin cậy tối thiểu (%)")
+        if err:
+            return None, err
+
+        mode = str(payload.get("response_mode", "INHERIT")).strip().upper() or "INHERIT"
+        if mode not in VALID_RESPONSE_MODES:
+            return None, f"[{service_id}] Chế độ ứng phó chỉ chấp nhận: {', '.join(VALID_RESPONSE_MODES)}"
+
+        is_active = bool(payload.get("is_active", True))
+        return {
+            "rule_id": f"rule_srv_{service_id}",
+            "rule_type": "SERVICE_AI_POLICY",
+            "service_id": service_id,
+            "is_active": is_active,
+            "response_mode": mode,
+            "m1_threshold_medium": round(m1_med, 4),
+            "m1_threshold_high": round(m1_high, 4),
+            "m1_threshold_critical": round(m1_crit, 4),
+            "forecast_threshold_pct": round(fc_thr, 1),
+            "forecast_critical_pct": round(fc_crit, 1),
+            "m2_confidence_threshold_pct": round(m2_conf, 1),
+            "updated_at": str(payload.get("updated_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        }, None
+
+    def get_service_alert_rules(self) -> Dict[str, Dict[str, Any]]:
+        return {sid: dict(rule) for sid, rule in self.service_alert_rules.items()}
+
+    def get_effective_service_policy(self, service_id: str) -> Dict[str, Any]:
+        """Trả bộ ngưỡng AI & chế độ ứng phó hiệu lực cho 1 dịch vụ (từ RAM cache < 0.01ms): Rule riêng -> Kế thừa chung."""
+        g = self.system_settings
+        global_auto = bool(g.get("auto_pilot", True))
+        custom = self.service_alert_rules.get(service_id)
+        if custom:
+            raw_mode = str(custom.get("response_mode", "INHERIT")).upper()
+            if raw_mode == "INHERIT":
+                eff_mode = "AUTO_PILOT" if global_auto else "HUMAN_APPROVAL"
+            else:
+                eff_mode = raw_mode
+            return {
+                "service_id": service_id,
+                "has_custom_rule": True,
+                "is_active": bool(custom.get("is_active", True)),
+                "response_mode": raw_mode,
+                "effective_response_mode": eff_mode,
+                "m1_threshold_medium": float(custom.get("m1_threshold_medium", g["m1_threshold_medium"])),
+                "m1_threshold_high": float(custom.get("m1_threshold_high", g["m1_threshold_high"])),
+                "m1_threshold_critical": float(custom.get("m1_threshold_critical", g["m1_threshold_critical"])),
+                "forecast_threshold_pct": float(custom.get("forecast_threshold_pct", g["forecast_threshold_pct"])),
+                "forecast_critical_pct": float(custom.get("forecast_critical_pct", g["forecast_critical_pct"])),
+                "m2_confidence_threshold_pct": float(custom.get("m2_confidence_threshold_pct", g["m2_confidence_threshold_pct"])),
+            }
+        return {
+            "service_id": service_id,
+            "has_custom_rule": False,
+            "is_active": True,
+            "response_mode": "INHERIT",
+            "effective_response_mode": "AUTO_PILOT" if global_auto else "HUMAN_APPROVAL",
+            "m1_threshold_medium": float(g["m1_threshold_medium"]),
+            "m1_threshold_high": float(g["m1_threshold_high"]),
+            "m1_threshold_critical": float(g["m1_threshold_critical"]),
+            "forecast_threshold_pct": float(g["forecast_threshold_pct"]),
+            "forecast_critical_pct": float(g["forecast_critical_pct"]),
+            "m2_confidence_threshold_pct": float(g["m2_confidence_threshold_pct"]),
+        }
+
+    def upsert_service_alert_rule(
+        self, service_id: str, payload: Dict[str, Any]
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        valid_sids = {s["service_id"] for s in self.services_cache}
+        if service_id not in valid_sids:
+            return None, f"Không tìm thấy dịch vụ '{service_id}'"
+        norm, err = self._validate_service_alert_rule(service_id, payload, self.system_settings)
+        if err or not norm:
+            return None, err
+        norm["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.service_alert_rules[service_id] = dict(norm)
+        self._sync_rules_cache_from_memory()
+        if self.connected and self.db is not None:
+            doc_copy = dict(norm)
+            rule_id = norm["rule_id"]
+            self._run_async(
+                lambda: self.db["AlertRules"].update_one(
+                    {"rule_id": rule_id}, {"$set": doc_copy}, upsert=True
+                )
+            )
+        return dict(norm), None
+
+    def delete_service_alert_rule(self, service_id: str) -> bool:
+        existed = self.service_alert_rules.pop(service_id, None) is not None
+        self._sync_rules_cache_from_memory()
+        if self.connected and self.db is not None:
+            rule_id = f"rule_srv_{service_id}"
+            self._run_async(lambda: self.db["AlertRules"].delete_one({"rule_id": rule_id}))
+        return existed
 
     def get_system_settings(self) -> Dict[str, Any]:
         return dict(self.system_settings)
@@ -805,7 +1026,32 @@ class AIOpsDatabase:
         if l3 < l2 + 5:
             return None, f"Thời gian leo thang Tầng 3 ({l3}s) phải lớn hơn Tầng 2 ít nhất 5 giây (≥ {l2 + 5}s)"
 
-        forecast_pct, err = _parse_num("forecast_threshold_pct", float, 40.0, 90.0, "Ngưỡng dự báo 5 phút (%)")
+        m1_med, err = _parse_num("m1_threshold_medium", float, 0.35, 0.85, "Model 1 · Ngưỡng MEDIUM")
+        if err:
+            return None, err
+        m1_high, err = _parse_num("m1_threshold_high", float, 0.40, 0.88, "Model 1 · Ngưỡng HIGH")
+        if err:
+            return None, err
+        m1_crit, err = _parse_num("m1_threshold_critical", float, 0.45, 0.95, "Model 1 · Ngưỡng CRITICAL")
+        if err:
+            return None, err
+        if m1_high < m1_med + 0.01:
+            return None, f"Model 1 · Ngưỡng HIGH ({m1_high:.4f}) phải lớn hơn MEDIUM ({m1_med:.4f}) ít nhất 0.01"
+        if m1_crit < m1_high + 0.01:
+            return None, f"Model 1 · Ngưỡng CRITICAL ({m1_crit:.4f}) phải lớn hơn HIGH ({m1_high:.4f}) ít nhất 0.01"
+
+        forecast_pct, err = _parse_num("forecast_threshold_pct", float, 40.0, 90.0, "Dự báo 5m · Ngưỡng kích hoạt M2 (%)")
+        if err:
+            return None, err
+        forecast_crit_pct, err = _parse_num("forecast_critical_pct", float, 55.0, 98.0, "Dự báo 5m · Ngưỡng CRITICAL (%)")
+        if err:
+            return None, err
+        if forecast_crit_pct < forecast_pct + 5.0:
+            return None, (
+                f"Dự báo 5m · Ngưỡng CRITICAL ({forecast_crit_pct:.1f}%) phải lớn hơn "
+                f"ngưỡng kích hoạt M2 ({forecast_pct:.1f}%) ít nhất 5%"
+            )
+        m2_conf_pct, err = _parse_num("m2_confidence_threshold_pct", float, 50.0, 95.0, "Model 2 RCA · Độ tin cậy tối thiểu (%)")
         if err:
             return None, err
         l3_conf, err = _parse_num("l3_min_confidence_pct", float, 70.0, 99.0, "Độ tin cậy tối thiểu Tầng 3 (%)")
@@ -835,7 +1081,12 @@ class AIOpsDatabase:
 
         updated: Dict[str, Any] = {
             "auto_pilot": _parse_bool("auto_pilot"),
+            "m1_threshold_medium": round(float(m1_med), 4),
+            "m1_threshold_high": round(float(m1_high), 4),
+            "m1_threshold_critical": round(float(m1_crit), 4),
             "forecast_threshold_pct": round(float(forecast_pct), 1),
+            "forecast_critical_pct": round(float(forecast_crit_pct), 1),
+            "m2_confidence_threshold_pct": round(float(m2_conf_pct), 1),
             "escalation_l2_seconds": int(l2),
             "escalation_l3_seconds": int(l3),
             "l3_auto_mitigate": _parse_bool("l3_auto_mitigate"),
@@ -853,7 +1104,41 @@ class AIOpsDatabase:
             "ui_poll_interval_ms": int(poll_ms),
         }
 
+        # Validate tùy chọn `service_rules` (luật AlertRule riêng theo từng dịch vụ) trước khi ghi bất kỳ thay đổi nào
+        validated_service_ops: List[Tuple[str, Optional[Dict[str, Any]]]] = []
+        if "service_rules" in payload and isinstance(payload["service_rules"], dict):
+            valid_sids = {s["service_id"] for s in self.services_cache}
+            for sid, r_cfg in payload["service_rules"].items():
+                sid_s = str(sid).strip()
+                if sid_s not in valid_sids:
+                    continue
+                if r_cfg is None:
+                    validated_service_ops.append((sid_s, None))
+                else:
+                    norm, r_err = self._validate_service_alert_rule(sid_s, r_cfg, updated)
+                    if r_err or not norm:
+                        return None, r_err
+                    norm["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    validated_service_ops.append((sid_s, norm))
+
         self.system_settings = updated
+        for sid_s, norm in validated_service_ops:
+            if norm is None:
+                self.service_alert_rules.pop(sid_s, None)
+                if self.connected and self.db is not None:
+                    rid = f"rule_srv_{sid_s}"
+                    self._run_async(lambda rid=rid: self.db["AlertRules"].delete_one({"rule_id": rid}))
+            else:
+                self.service_alert_rules[sid_s] = dict(norm)
+                if self.connected and self.db is not None:
+                    doc_copy = dict(norm)
+                    rid = norm["rule_id"]
+                    self._run_async(
+                        lambda rid=rid, doc_copy=doc_copy: self.db["AlertRules"].update_one(
+                            {"rule_id": rid}, {"$set": doc_copy}, upsert=True
+                        )
+                    )
+        self._sync_rules_cache_from_memory()
         self.update_policy_rule(
             threshold_pct=updated["forecast_threshold_pct"],
             auto_pilot=updated["auto_pilot"],
@@ -861,11 +1146,16 @@ class AIOpsDatabase:
         return dict(updated), None
 
     def reset_system_settings(self) -> Dict[str, Any]:
-        """Khôi phục thông số vận hành về mặc định chuẩn đồ án, giữ nguyên kết nối Telegram Chat ID hiện tại."""
+        """Khôi phục thông số vận hành, ngưỡng AI (.pkl) và gỡ toàn bộ AlertRule riêng về mặc định chung."""
         cur = dict(self.system_settings)
         defaults = {
             "auto_pilot": True,
-            "forecast_threshold_pct": 60.0,
+            "m1_threshold_medium": round(float(self.ai_defaults["m1_threshold_medium"]), 4),
+            "m1_threshold_high": round(float(self.ai_defaults["m1_threshold_high"]), 4),
+            "m1_threshold_critical": round(float(self.ai_defaults["m1_threshold_critical"]), 4),
+            "forecast_threshold_pct": round(float(self.ai_defaults["forecast_threshold_pct"]), 1),
+            "forecast_critical_pct": round(float(self.ai_defaults["forecast_critical_pct"]), 1),
+            "m2_confidence_threshold_pct": round(float(self.ai_defaults["m2_confidence_threshold_pct"]), 1),
             "escalation_l2_seconds": 30,
             "escalation_l3_seconds": 60,
             "l3_auto_mitigate": True,
@@ -883,6 +1173,14 @@ class AIOpsDatabase:
             "ui_poll_interval_ms": 2000,
         }
         self.system_settings = defaults
+        self.service_alert_rules.clear()
+        self._sync_rules_cache_from_memory()
+        if self.connected and self.db is not None:
+            self._run_async(
+                lambda: self.db["AlertRules"].delete_many(
+                    {"$or": [{"rule_type": "SERVICE_AI_POLICY"}, {"rule_id": {"$regex": "^rule_srv_"}}]}
+                )
+            )
         self.update_policy_rule(
             threshold_pct=defaults["forecast_threshold_pct"],
             auto_pilot=defaults["auto_pilot"],
@@ -924,7 +1222,7 @@ class AIOpsDatabase:
         }
 
         self.ai_results_cache.insert(0, ai_doc)
-        self.ai_results_cache = self.ai_results_cache[:20]
+        self.ai_results_cache = self.ai_results_cache[:200]
         self.counts["AIResults"] = self.counts.get("AIResults", 0) + 1
 
         if self.connected and self.db is not None:
@@ -947,7 +1245,7 @@ class AIOpsDatabase:
                 "status": "ACTIVE",
             }
             self.alerts_cache.insert(0, alert_doc)
-            self.alerts_cache = self.alerts_cache[:20]
+            self.alerts_cache = self.alerts_cache[:200]
             self.counts["Alerts"] = self.counts.get("Alerts", 0) + 1
             if self.connected and self.db is not None:
                 alt_copy = dict(alert_doc)
@@ -977,7 +1275,7 @@ class AIOpsDatabase:
             "status": "RESOLVED" if is_resolved else "ACTIVE",
         }
         self.alerts_cache.insert(0, alert_doc)
-        self.alerts_cache = self.alerts_cache[:20]
+        self.alerts_cache = self.alerts_cache[:200]
         self.counts["Alerts"] = self.counts.get("Alerts", 0) + 1
         if self.connected and self.db is not None:
             alt_copy = dict(alert_doc)
@@ -1014,7 +1312,7 @@ class AIOpsDatabase:
             "actor": actor, 
         }
         self.remediations_cache.insert(0, rem_doc)
-        self.remediations_cache = self.remediations_cache[:20]
+        self.remediations_cache = self.remediations_cache[:200]
         self.counts["RemediationActions"] = self.counts.get("RemediationActions", 0) + 1
 
         if self.connected and self.db is not None:

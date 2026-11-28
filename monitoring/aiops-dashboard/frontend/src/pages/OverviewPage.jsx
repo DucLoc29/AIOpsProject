@@ -1,6 +1,6 @@
 import React from 'react';
 import { Code } from '../components/DataTable.jsx';
-import { StatusPill, faultLabel, normSev, sevLabel, sevRank, worstLevel } from '../lib.jsx';
+import { StatusPill, faultLabel, getRuleCommands, normSev, sevLabel, sevRank, worstLevel } from '../lib.jsx';
 
 function Metric({ label, value, unit }) {
   return (
@@ -19,8 +19,9 @@ function ServiceCard({ ev, onOpen }) {
   const forecastSev = normSev(ev.model2?.forecast_level);
   const m = ev.metrics || {};
   const invoked = ev.model3?.invoked;
-  const protectedNow = ev.protection_status === 'PROTECTED';
-  const pending = ev.protection_status === 'PENDING_APPROVAL';
+  const protectedNow = Boolean(ev.active_rule) || ev.protection_status === 'PROTECTED';
+  const pending = Boolean(ev.pending_rule) || ev.protection_status === 'PENDING_APPROVAL';
+  const ruleCount = getRuleCommands(ev.active_rule).length;
 
   return (
     <button className={`svc-card sev-border-${sev}`} onClick={() => onOpen(ev.service_id)}>
@@ -43,8 +44,12 @@ function ServiceCard({ ev, onOpen }) {
       <div className="svc-lines">
         <div>
           <span>Dự báo 5 phút tới</span>
+          <strong className={`sev-text-${forecastSev}`}>{sevLabel(forecastSev)}</strong>
+        </div>
+        <div>
+          <span>Tỉ lệ suy giảm</span>
           <strong className={`sev-text-${forecastSev}`}>
-            {sevLabel(forecastSev)} ({ev.model2?.prob_5m_pct?.toFixed(0) ?? 0}%)
+            {ev.model2?.prob_5m_pct?.toFixed(0) ?? 0}%
           </strong>
         </div>
         <div>
@@ -57,7 +62,11 @@ function ServiceCard({ ev, onOpen }) {
 
       {(protectedNow || pending) && (
         <div className={`svc-chip ${pending ? 'warn' : 'ok'}`}>
-          {pending ? 'Chờ quản trị viên phê duyệt' : 'Đã chặn tác nhân tấn công'}
+          {pending
+            ? 'Chờ quản trị viên phê duyệt'
+            : ruleCount > 1
+            ? `Đã chặn tác nhân tấn công (${ruleCount} luật)`
+            : 'Đã chặn tác nhân tấn công'}
         </div>
       )}
     </button>

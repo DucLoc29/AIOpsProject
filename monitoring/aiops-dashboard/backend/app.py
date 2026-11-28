@@ -105,18 +105,24 @@ class AIOpsStateEngine:
             pass
 
         t4 = self.m1_bundle.get("thresholds_4level", {})
-        self.m1_th_high = float(t4.get("HIGH", self.m1_model.threshold_))
-        self.m1_th_med = float(t4.get("MEDIUM", max(0.46, self.m1_th_high - 0.06)))
-        self.m1_th_crit = float(t4.get("CRITICAL", min(0.85, self.m1_th_high + 0.05)))
-        self.m2_conf_threshold = float(self.m2_rca_bundle.get("confidence_threshold", 0.70))
+        self.m1_default_th_high = round(float(t4.get("HIGH", self.m1_model.threshold_)), 4)
+        self.m1_default_th_med = round(float(t4.get("MEDIUM", max(0.46, self.m1_default_th_high - 0.06))), 4)
+        self.m1_default_th_crit = round(float(t4.get("CRITICAL", min(0.85, self.m1_default_th_high + 0.05))), 4)
+        self.m2_default_conf_pct = round(float(self.m2_rca_bundle.get("confidence_threshold", 0.70)) * 100.0, 1)
+
+        self.m1_th_med = self.m1_default_th_med
+        self.m1_th_high = self.m1_default_th_high
+        self.m1_th_crit = self.m1_default_th_crit
+        self.m2_conf_threshold = self.m2_default_conf_pct / 100.0
+        self.forecast_critical_pct = 80.0
 
         print(
             f"[✓] Model 1 EIF sẵn sàng ({len(self.m1_bundle['feature_names'])} features | "
-            f"Ngưỡng: MED={self.m1_th_med}, HIGH={self.m1_th_high}, CRIT={self.m1_th_crit})"
+            f"Ngưỡng chuẩn .pkl: MED={self.m1_default_th_med}, HIGH={self.m1_default_th_high}, CRIT={self.m1_default_th_crit})"
         )
         print(
             f"[✓] Model 2 XGBoost RCA sẵn sàng ({len(self.m2_rca_bundle['feature_names'])} features | "
-            f"Lớp: {list(self.m2_rca_bundle.get('class_names', []))} | Ngưỡng tự tin: {self.m2_conf_threshold:.2f})"
+            f"Lớp: {list(self.m2_rca_bundle.get('class_names', []))} | Ngưỡng tự tin chuẩn: {self.m2_default_conf_pct:.1f}%)"
         )
 
         # Nạp ngưỡng `sustained_ratio` từ ĐÚNG các mẫu Normal sạch (loại bỏ TransientSpike)
@@ -129,7 +135,16 @@ class AIOpsStateEngine:
         self.baseline_medians, self.sustained_thresholds = compute_sustained_thresholds(clean_normal)
         print(f"[✓] Ngưỡng sustained_ratio đồng bộ: {self.sustained_thresholds}")
 
-        self.db = AIOpsDatabase()
+        self.db = AIOpsDatabase(
+            ai_defaults={
+                "m1_threshold_medium": self.m1_default_th_med,
+                "m1_threshold_high": self.m1_default_th_high,
+                "m1_threshold_critical": self.m1_default_th_crit,
+                "forecast_threshold_pct": 60.0,
+                "forecast_critical_pct": 80.0,
+                "m2_confidence_threshold_pct": self.m2_default_conf_pct,
+            }
+        )
         sys_cfg = self.db.get_system_settings()
 
         self.prom_url = os.environ.get("PROMETHEUS_URL", "http://127.0.0.1:9090")
@@ -142,14 +157,7 @@ class AIOpsStateEngine:
             self.collector.ensure_services_registered(list(self.db.services_cache))
 
         self.tick_counter = 0
-        self.forecast_threshold = float(sys_cfg.get("forecast_threshold_pct", 60.0)) / 100.0
-        self.auto_pilot = bool(sys_cfg.get("auto_pilot", True))
-        self.l3_auto_mitigate = bool(sys_cfg.get("l3_auto_mitigate", True))
-        self.l3_min_confidence_pct = float(sys_cfg.get("l3_min_confidence_pct", 80.0))
-        self.auto_resolved_cycles = int(sys_cfg.get("auto_resolved_cycles", 2))
-        self.incident_cooldown_seconds = float(sys_cfg.get("incident_cooldown_seconds", 12.0))
-        self.dismissed_cooldown_seconds = float(sys_cfg.get("dismissed_cooldown_seconds", 45.0))
-        self.spike_log_cooldown_seconds = float(sys_cfg.get("spike_log_cooldown_seconds", 18.0))
+        self._sync_runtime_from_settings_unlocked(sys_cfg)
 
         # Cửa sổ trượt 5 bước riêng cho từng dịch vụ
         self.service_windows: Dict[str, List[Dict[str, float]]] = {}
@@ -321,9 +329,11 @@ class AIOpsStateEngine:
             x_m1_s = np.arcsinh(self.m1_bundle["scaler"].transform(x_m1))
             eif_score = float(self.m1_model.anomaly_score(x_m1_s)[0])
 
-        th_med = self.m1_th_med
-        th_high = self.m1_th_high
-        th_crit = self.m1_th_crit
+        svc_policy = self.db.get_effective_service_policy(sid)
+        th_med = float(svc_policy["m1_threshold_medium"])
+        th_high = float(svc_policy["m1_threshold_high"])
+        th_crit = float(svc_policy["m1_threshold_critical"])
+        m2_conf_thr = max(0.50, min(0.95, float(svc_policy["m2_confidence_threshold_pct"]) / 100.0))
 
         # Độ duy trì trên cửa sổ trượt 5 bước:
         #   - 1-2 bước (max_sustained <= 0.40, ~2-4 giây gai nhiễu thoáng qua như 05_transient_spike.sh)
@@ -355,17 +365,18 @@ class AIOpsStateEngine:
             th_crit=th_crit,
         )
 
+        thr_pct = round(float(svc_policy["forecast_threshold_pct"]), 1)
+        crit_pct = round(max(thr_pct + 5.0, float(svc_policy["forecast_critical_pct"])), 1)
         if max_sustained <= 0.40:
             prob_5m_pct = min(formula_prob_pct, 18.0)
             forecast_level = "NORMAL"
         else:
             prob_5m_pct = round(formula_prob_pct, 2)
-            if prob_5m_pct >= 80.0:
+            if prob_5m_pct >= crit_pct:
                 forecast_level = "CRITICAL"
-            elif prob_5m_pct >= round(self.forecast_threshold * 100.0, 0):
+            elif prob_5m_pct >= thr_pct:
                 forecast_level = "HIGH"
 
-        thr_pct = round(self.forecast_threshold * 100.0, 0)
         is_sustained = bool(prob_5m_pct >= thr_pct and forecast_level in ("HIGH", "CRITICAL"))
 
         # --- CỔNG ĐIỀU PHỐI (Policy Gate) ---
@@ -402,7 +413,7 @@ class AIOpsStateEngine:
                         pred_idx, best_p = max(non_normal, key=lambda x: x[1])
                         best_cls = str(class_names[pred_idx])
 
-                if best_p < self.m2_conf_threshold:
+                if best_p < m2_conf_thr:
                     fault_class = "Unknown_Anomaly"
                 else:
                     fault_class = best_cls
@@ -460,6 +471,12 @@ class AIOpsStateEngine:
             ),
             "active_rule": active_rule,
             "pending_rule": pending_rule,
+            "alert_rule": {
+                "has_custom_rule": bool(svc_policy["has_custom_rule"]),
+                "is_active": bool(svc_policy["is_active"]),
+                "response_mode": svc_policy["response_mode"],
+                "effective_response_mode": svc_policy["effective_response_mode"],
+            },
             "impact_description": remediation_plan["title"],
             "metrics": metrics_6,
             "sliding_window_matrix": sliding_matrix,
@@ -491,11 +508,15 @@ class AIOpsStateEngine:
                 "forecast_label_vi": SEVERITY_LABELS_VI.get(forecast_level, forecast_level),
                 "prob_5m_pct": round(prob_5m_pct, 2),
                 "threshold_pct": thr_pct,
+                "critical_pct": crit_pct,
                 "is_sustained": is_sustained,
             },
             "policy_gate": {
                 "trigger_model3": trigger_m3,
-                "auto_pilot": self.auto_pilot,
+                "auto_pilot": svc_policy["effective_response_mode"] == "AUTO_PILOT",
+                "response_mode": svc_policy["effective_response_mode"],
+                "rule_active": bool(svc_policy["is_active"]),
+                "rule_source": "SERVICE_CUSTOM" if svc_policy["has_custom_rule"] else "GLOBAL_DEFAULT",
                 "reason": (
                     f"KÍCH HOẠT MODEL 2 RCA (Hiện tại: {SEVERITY_LABELS_VI.get(severity_level)} · Dự báo 5m: {SEVERITY_LABELS_VI.get(forecast_level)} {prob_5m_pct:.1f}%)"
                     if trigger_m3
@@ -512,7 +533,7 @@ class AIOpsStateEngine:
                 "invoked": trigger_m3,
                 "fault_class": fault_class,
                 "confidence_pct": confidence,
-                "confidence_threshold_pct": round(self.m2_conf_threshold * 100.0, 0),
+                "confidence_threshold_pct": round(m2_conf_thr * 100.0, 1),
                 "class_probabilities": class_probs,
                 "remediation": {
                     "target_node": remediation_plan["target_node"],
@@ -544,6 +565,19 @@ class AIOpsStateEngine:
         for sid, p in list(self.pending_approvals.items()):
             ev = service_evaluations.get(sid)
             if not ev:
+                continue
+            svc_pol_p = self.db.get_effective_service_policy(sid)
+            if not svc_pol_p["is_active"]:
+                self.pending_approvals.pop(sid, None)
+                notify_events.append(
+                    (
+                        "sync_pending",
+                        {
+                            "service_id": sid,
+                            "note": f"🔕 Đã tắt giám sát cảnh báo cho dịch vụ lúc {datetime.now().strftime('%H:%M:%S')}",
+                        },
+                    )
+                )
                 continue
             sev = ev.get("severity_level", "NORMAL")
             srv_doc = next((s for s in self.db.services_cache if s["service_id"] == sid), p)
@@ -593,7 +627,7 @@ class AIOpsStateEngine:
                         "actor": "Escalation-L2",
                     },
                 )
-                self.audit_logs = self.audit_logs[:30]
+                self.audit_logs = self.audit_logs[:200]
                 self.db.record_remediation_action(
                     result_id=p.get("result_id", "escalation_l2"),
                     service_id=sid,
@@ -675,7 +709,7 @@ class AIOpsStateEngine:
                             "actor": "Escalation-L3",
                         },
                     )
-                    self.audit_logs = self.audit_logs[:30]
+                    self.audit_logs = self.audit_logs[:200]
                     self.db.record_remediation_action(
                         result_id=p.get("result_id", "escalation_l3"),
                         service_id=sid,
@@ -741,6 +775,9 @@ class AIOpsStateEngine:
         # 3) Đánh giá sự cố mới phát sinh ở chu kỳ hiện tại
         for sid, ev in service_evaluations.items():
             srv_doc = next((s for s in self.db.services_cache if s["service_id"] == sid), ev)
+            svc_policy = self.db.get_effective_service_policy(sid)
+            if not svc_policy["is_active"]:
+                continue
 
             # Tầng 0 (SUPPRESSED): TransientSpike -> CHỈ ghi log, TUYỆT ĐỐI KHÔNG gửi Telegram!
             if ev["severity_level"] == "MEDIUM" and not ev["policy_gate"]["trigger_model3"]:
@@ -772,7 +809,7 @@ class AIOpsStateEngine:
                         "actor": "AI-Filter",
                     }
                     self.audit_logs.insert(0, entry)
-                    self.audit_logs = self.audit_logs[:30]
+                    self.audit_logs = self.audit_logs[:200]
                     self.db.record_remediation_action(
                         result_id=result_id,
                         service_id=sid,
@@ -796,15 +833,12 @@ class AIOpsStateEngine:
             fault_cls = ev["model3"]["fault_class"]
             plan = ev["model3"].get("_full_plan") or build_service_remediation_plan(fault_cls, srv_doc)
             existing_rule = self.active_service_rules.get(sid)
-            if (
-                existing_rule
-                and existing_rule.get("fault_class") == fault_cls
-                and all(
-                    ip.strip() in str(existing_rule.get("attacker_ip", ""))
-                    for ip in str(plan.get("attacker_ip", "")).split(",")
-                    if ip.strip()
-                )
-            ):
+            plan_rb = plan.get("rollback_cmds") or ([plan["rollback_cmd"]] if plan.get("rollback_cmd") else [])
+            existing_rb = (
+                existing_rule.get("rollback_cmds")
+                or ([existing_rule["rollback_cmd"]] if existing_rule.get("rollback_cmd") else [])
+            ) if existing_rule else []
+            if existing_rule and plan_rb and all(cmd in existing_rb for cmd in plan_rb):
                 continue
             if (
                 sid in self.pending_approvals
@@ -845,6 +879,7 @@ class AIOpsStateEngine:
                 "normal_streak": 0,
             }
 
+            eff_mode = svc_policy["effective_response_mode"]
             if fault_cls == "Unknown_Anomaly" or not plan.get("apply_cmds"):
                 entry = {
                     "time": datetime.now().strftime("%H:%M:%S"),
@@ -859,7 +894,7 @@ class AIOpsStateEngine:
                     "actor": "AI-RCA",
                 }
                 self.audit_logs.insert(0, entry)
-                self.audit_logs = self.audit_logs[:30]
+                self.audit_logs = self.audit_logs[:200]
                 self.db.record_remediation_action(
                     result_id=result_id,
                     service_id=sid,
@@ -884,7 +919,7 @@ class AIOpsStateEngine:
                         },
                     )
                 )
-            elif self.auto_pilot:
+            elif eff_mode == "AUTO_PILOT":
                 self._register_service_rule_unlocked(
                     service=srv_doc,
                     plan=plan,
@@ -928,7 +963,7 @@ class AIOpsStateEngine:
                     "actor": "Escalation-L1",
                 }
                 self.audit_logs.insert(0, entry)
-                self.audit_logs = self.audit_logs[:30]
+                self.audit_logs = self.audit_logs[:200]
                 self.db.record_remediation_action(
                     result_id=result_id,
                     service_id=sid,
@@ -1031,12 +1066,21 @@ class AIOpsStateEngine:
         for sid, ev in service_evaluations.items():
             active_rule = self.active_service_rules.get(sid)
             pending_rule = self.pending_approvals.get(sid)
+            svc_pol = self.db.get_effective_service_policy(sid)
             ev["active_rule"] = active_rule
             ev["pending_rule"] = pending_rule
             ev["protection_status"] = (
                 "PROTECTED" if active_rule else ("PENDING_APPROVAL" if pending_rule else "MONITORING")
             )
-            ev["policy_gate"]["auto_pilot"] = self.auto_pilot
+            ev["alert_rule"] = {
+                "has_custom_rule": bool(svc_pol["has_custom_rule"]),
+                "is_active": bool(svc_pol["is_active"]),
+                "response_mode": svc_pol["response_mode"],
+                "effective_response_mode": svc_pol["effective_response_mode"],
+            }
+            ev["policy_gate"]["auto_pilot"] = svc_pol["effective_response_mode"] == "AUTO_PILOT"
+            ev["policy_gate"]["response_mode"] = svc_pol["effective_response_mode"]
+            ev["policy_gate"]["rule_active"] = bool(svc_pol["is_active"])
             services_perf[sid] = ev["metrics"]
 
         self.db.update_services_live_state(service_evaluations)
@@ -1071,7 +1115,11 @@ class AIOpsStateEngine:
             "service_evaluations": service_evaluations,
             "model1": primary_ev["model1"] if primary_ev else {},
             "model2": primary_ev["model2"] if primary_ev else {},
-            "policy_gate": primary_ev["policy_gate"] if primary_ev else {"auto_pilot": self.auto_pilot},
+            "policy_gate": (
+                {**primary_ev["policy_gate"], "auto_pilot": self.auto_pilot}
+                if primary_ev
+                else {"auto_pilot": self.auto_pilot}
+            ),
             "model3": primary_ev["model3"] if primary_ev else {},
             "telemetry": {
                 "active_services_count": len(services_snapshot),
@@ -1095,7 +1143,7 @@ class AIOpsStateEngine:
             "db_stats": self.db.get_collection_stats(),
             "telegram": self.notifier.get_status(),
             "settings": self.db.get_public_settings(),
-            "audit_logs": self.audit_logs[:15],
+            "audit_logs": self.audit_logs[:100],
         }
         return state, actions_to_run, notify_events
 
@@ -1104,7 +1152,7 @@ class AIOpsStateEngine:
         if not self.latest_state:
             return self.latest_state
         st = dict(self.latest_state)
-        st["audit_logs"] = self.audit_logs[:15]
+        st["audit_logs"] = self.audit_logs[:100]
         st["db_stats"] = self.db.get_collection_stats()
         st["telegram"] = self.notifier.get_status()
         st["settings"] = self.db.get_public_settings()
@@ -1121,13 +1169,26 @@ class AIOpsStateEngine:
             ev_c = dict(ev)
             active_rule = self.active_service_rules.get(sid)
             pending_rule = self.pending_approvals.get(sid)
+            svc_pol = self.db.get_effective_service_policy(sid)
             ev_c["active_rule"] = active_rule
             ev_c["pending_rule"] = pending_rule
             ev_c["protection_status"] = (
                 "PROTECTED" if active_rule else ("PENDING_APPROVAL" if pending_rule else "MONITORING")
             )
+            ev_c["alert_rule"] = {
+                "has_custom_rule": bool(svc_pol["has_custom_rule"]),
+                "is_active": bool(svc_pol["is_active"]),
+                "response_mode": svc_pol["response_mode"],
+                "effective_response_mode": svc_pol["effective_response_mode"],
+            }
             if isinstance(ev_c.get("policy_gate"), dict):
-                ev_c["policy_gate"] = {**ev_c["policy_gate"], "auto_pilot": self.auto_pilot}
+                ev_c["policy_gate"] = {
+                    **ev_c["policy_gate"],
+                    "auto_pilot": svc_pol["effective_response_mode"] == "AUTO_PILOT",
+                    "response_mode": svc_pol["effective_response_mode"],
+                    "rule_active": bool(svc_pol["is_active"]),
+                    "rule_source": "SERVICE_CUSTOM" if svc_pol["has_custom_rule"] else "GLOBAL_DEFAULT",
+                }
             evals[sid] = ev_c
         st["service_evaluations"] = evals
         blocked_targets = [
@@ -1175,27 +1236,133 @@ class AIOpsStateEngine:
     ) -> None:
         sid = service["service_id"]
         self.pending_approvals.pop(sid, None)
+        now_str = datetime.now().strftime("%H:%M:%S")
+
+        def _split_cmds(cmd_str: str) -> List[str]:
+            return [c.strip() for c in str(cmd_str or "").split("&&") if c.strip()]
+
+        new_cmds = _split_cmds(plan.get("command", ""))
+        new_rb = [
+            list(c)
+            for c in (plan.get("rollback_cmds") or ([plan["rollback_cmd"]] if plan.get("rollback_cmd") else []))
+            if c
+        ]
+        new_ips = [ip.strip() for ip in str(plan.get("attacker_ip", "")).split(",") if ip.strip()]
+        new_entry = {
+            "fault_class": plan["fault_class"],
+            "attacker_ip": ", ".join(new_ips) or str(plan.get("attacker_ip", "203.0.113.10")),
+            "target_node": plan.get("target_node", ""),
+            "commands": list(new_cmds),
+            "command": " && ".join(new_cmds) if new_cmds else str(plan.get("command", "")),
+            "rollback_cmds": list(new_rb),
+            "applied_at": now_str,
+            "mode": mode,
+        }
+
         prev = self.active_service_rules.get(sid)
-        if prev and prev.get("fault_class") == plan["fault_class"]:
-            # Gộp thêm IP tấn công mới nếu có thêm nguồn thứ 2/3 tấn công vào cùng dịch vụ đã có rule
-            merged_ips = []
+        if prev:
+            # Luôn cộng dồn (merge) mọi luật bảo vệ của dịch vụ, kể cả khi nhiều loại tấn công khác nhau xảy ra liên tiếp
+            merged_ips: List[str] = []
             for s in (prev.get("attacker_ip", ""), plan.get("attacker_ip", "")):
                 for ip in str(s).split(","):
                     ip = ip.strip()
                     if ip and ip not in merged_ips:
                         merged_ips.append(ip)
-            merged_rb = list(prev.get("rollback_cmds") or [])
-            for c in plan.get("rollback_cmds") or []:
+
+            merged_faults: List[str] = []
+            prev_faults = list(prev.get("fault_classes") or [])
+            if not prev_faults:
+                prev_faults = [f.strip() for f in str(prev.get("fault_class", "")).split(",") if f.strip()]
+            for fc in prev_faults + [plan["fault_class"]]:
+                fc_s = str(fc).strip()
+                if fc_s and fc_s not in merged_faults:
+                    merged_faults.append(fc_s)
+
+            merged_nodes: List[str] = []
+            prev_nodes = list(prev.get("target_nodes") or ([prev.get("target_node", "")] if prev.get("target_node") else []))
+            for nd in prev_nodes + [plan.get("target_node", "")]:
+                nd_s = str(nd).strip()
+                if nd_s and nd_s not in merged_nodes:
+                    merged_nodes.append(nd_s)
+
+            merged_cmds: List[str] = []
+            prev_cmds = list(prev.get("commands") or _split_cmds(prev.get("command", "")))
+            for c in prev_cmds + new_cmds:
+                if c and c not in merged_cmds:
+                    merged_cmds.append(c)
+
+            merged_rb: List[List[str]] = [
+                list(c)
+                for c in (prev.get("rollback_cmds") or ([prev["rollback_cmd"]] if prev.get("rollback_cmd") else []))
+                if c
+            ]
+            for c in new_rb:
                 if c not in merged_rb:
                     merged_rb.append(c)
-            merged_cmd = prev.get("command", "")
-            if plan.get("command") and plan["command"] not in merged_cmd:
-                merged_cmd = f"{merged_cmd} && {plan['command']}" if merged_cmd else plan["command"]
+
+            prev_items = prev.get("rules")
+            if isinstance(prev_items, list) and prev_items:
+                merged_items: List[Dict[str, Any]] = [
+                    {
+                        **it,
+                        "commands": list(it.get("commands") or _split_cmds(it.get("command", ""))),
+                        "rollback_cmds": [list(c) for c in (it.get("rollback_cmds") or []) if c],
+                    }
+                    for it in prev_items
+                ]
+            else:
+                merged_items = [
+                    {
+                        "fault_class": prev.get("fault_class", ""),
+                        "attacker_ip": prev.get("attacker_ip", ""),
+                        "target_node": prev.get("target_node", ""),
+                        "commands": list(prev_cmds),
+                        "command": " && ".join(prev_cmds),
+                        "rollback_cmds": list(merged_rb),
+                        "applied_at": prev.get("applied_at", now_str),
+                        "mode": prev.get("mode", mode),
+                    }
+                ]
+
+            existing_item = next(
+                (it for it in merged_items if it.get("fault_class") == plan["fault_class"]),
+                None,
+            )
+            if existing_item:
+                it_ips = [ip.strip() for ip in str(existing_item.get("attacker_ip", "")).split(",") if ip.strip()]
+                for ip in new_ips:
+                    if ip not in it_ips:
+                        it_ips.append(ip)
+                it_cmds = list(existing_item.get("commands") or [])
+                for c in new_cmds:
+                    if c not in it_cmds:
+                        it_cmds.append(c)
+                it_rb = [list(c) for c in (existing_item.get("rollback_cmds") or []) if c]
+                for c in new_rb:
+                    if c not in it_rb:
+                        it_rb.append(c)
+                existing_item["attacker_ip"] = ", ".join(it_ips)
+                existing_item["commands"] = it_cmds
+                existing_item["command"] = " && ".join(it_cmds)
+                existing_item["rollback_cmds"] = it_rb
+                existing_item["applied_at"] = now_str
+                existing_item["mode"] = mode
+            else:
+                merged_items.append(new_entry)
+
             rule_record = dict(prev)
+            rule_record["fault_class"] = ", ".join(merged_faults)
+            rule_record["fault_classes"] = merged_faults
             rule_record["attacker_ip"] = ", ".join(merged_ips)
-            rule_record["command"] = merged_cmd
+            rule_record["target_node"] = " + ".join(merged_nodes)
+            rule_record["target_nodes"] = merged_nodes
+            rule_record["commands"] = merged_cmds
+            rule_record["command"] = " && ".join(merged_cmds)
+            rule_record["rollback_cmd"] = merged_rb[0] if merged_rb else []
             rule_record["rollback_cmds"] = merged_rb
-            rule_record["applied_at"] = datetime.now().strftime("%H:%M:%S")
+            rule_record["rules"] = merged_items
+            rule_record["applied_at"] = now_str
+            rule_record["mode"] = mode
         else:
             rule_record = {
                 "service_id": sid,
@@ -1203,12 +1370,16 @@ class AIOpsStateEngine:
                 "address": service["address"],
                 "port": service["port"],
                 "fault_class": plan["fault_class"],
-                "attacker_ip": plan.get("attacker_ip", "203.0.113.10"),
+                "fault_classes": [plan["fault_class"]],
+                "attacker_ip": new_entry["attacker_ip"],
                 "target_node": plan["target_node"],
-                "command": plan["command"],
-                "rollback_cmd": plan.get("rollback_cmd", []),
-                "rollback_cmds": list(plan.get("rollback_cmds") or []),
-                "applied_at": datetime.now().strftime("%H:%M:%S"),
+                "target_nodes": [plan["target_node"]],
+                "commands": new_cmds,
+                "command": new_entry["command"],
+                "rollback_cmd": new_rb[0] if new_rb else [],
+                "rollback_cmds": new_rb,
+                "rules": [new_entry],
+                "applied_at": now_str,
                 "mode": mode,
             }
         self.active_service_rules[sid] = rule_record
@@ -1271,7 +1442,7 @@ class AIOpsStateEngine:
                         "actor": actor,
                     },
                 )
-                self.audit_logs = self.audit_logs[:30]
+                self.audit_logs = self.audit_logs[:200]
                 self.db.record_remediation_action(
                     result_id=result_id,
                     service_id=sid,
@@ -1363,7 +1534,7 @@ class AIOpsStateEngine:
                         "actor": actor,
                     },
                 )
-                self.audit_logs = self.audit_logs[:30]
+                self.audit_logs = self.audit_logs[:200]
                 self.db.record_remediation_action(
                     result_id=p.get("result_id", "dismiss"),
                     service_id=sid,
@@ -1383,16 +1554,125 @@ class AIOpsStateEngine:
             self.notifier.sync_pending_resolved(sid, f"❌ Đã bỏ qua bởi {actor} lúc {now_str}")
         return st
 
-    def rollback_service_or_all(self, service_id: str | None = None, actor: str = "admin (Web)") -> Dict[str, Any]:
+    def rollback_service_or_all(
+        self,
+        service_id: str | None = None,
+        fault_class: str | None = None,
+        actor: str = "admin (Web)",
+    ) -> Dict[str, Any]:
         with self._lock:
-            if service_id and service_id in self.active_service_rules:
+            if service_id:
+                if service_id not in self.active_service_rules:
+                    return self._patch_latest_state_unlocked()
+
+                cur_rule = self.active_service_rules[service_id]
+                target_str = f"{cur_rule['service_name']} ({cur_rule['address']}:{cur_rule['port']})"
+                fc_target = str(fault_class or "").strip()
+                cur_items = cur_rule.get("rules") if isinstance(cur_rule.get("rules"), list) else []
+
+                if fc_target and cur_items:
+                    matched_items = [it for it in cur_items if str(it.get("fault_class", "")).strip() == fc_target]
+                    kept_items = [it for it in cur_items if str(it.get("fault_class", "")).strip() != fc_target]
+                    if not matched_items:
+                        return self._patch_latest_state_unlocked()
+
+                    if kept_items:
+                        removed_rb: List[List[str]] = []
+                        for it in matched_items:
+                            for c in (it.get("rollback_cmds") or []):
+                                if c and c not in removed_rb:
+                                    removed_rb.append(list(c))
+
+                        # Xây lại bản ghi luật còn lại của dịch vụ từ kept_items
+                        kept_faults: List[str] = []
+                        kept_ips: List[str] = []
+                        kept_nodes: List[str] = []
+                        kept_cmds: List[str] = []
+                        kept_rb: List[List[str]] = []
+                        for it in kept_items:
+                            fc_s = str(it.get("fault_class", "")).strip()
+                            if fc_s and fc_s not in kept_faults:
+                                kept_faults.append(fc_s)
+                            for ip in str(it.get("attacker_ip", "")).split(","):
+                                ip = ip.strip()
+                                if ip and ip not in kept_ips:
+                                    kept_ips.append(ip)
+                            nd_s = str(it.get("target_node", "")).strip()
+                            if nd_s and nd_s not in kept_nodes:
+                                kept_nodes.append(nd_s)
+                            for c in (it.get("commands") or []):
+                                if c and c not in kept_cmds:
+                                    kept_cmds.append(c)
+                            for c in (it.get("rollback_cmds") or []):
+                                if c and c not in kept_rb:
+                                    kept_rb.append(list(c))
+
+                        updated_rule = dict(cur_rule)
+                        updated_rule["fault_class"] = ", ".join(kept_faults)
+                        updated_rule["fault_classes"] = kept_faults
+                        updated_rule["attacker_ip"] = ", ".join(kept_ips)
+                        updated_rule["target_node"] = " + ".join(kept_nodes)
+                        updated_rule["target_nodes"] = kept_nodes
+                        updated_rule["commands"] = kept_cmds
+                        updated_rule["command"] = " && ".join(kept_cmds)
+                        updated_rule["rollback_cmd"] = kept_rb[0] if kept_rb else []
+                        updated_rule["rollback_cmds"] = kept_rb
+                        updated_rule["rules"] = [dict(it) for it in kept_items]
+                        updated_rule["applied_at"] = kept_items[-1].get("applied_at", cur_rule.get("applied_at", ""))
+                        updated_rule["mode"] = kept_items[-1].get("mode", cur_rule.get("mode", "AUTO-PILOT"))
+                        self.active_service_rules[service_id] = updated_rule
+                        self.incident_cooldown.pop(service_id, None)
+
+                        remaining = list(self.active_service_rules.values())
+                        removed_plan = {"rollback_cmds": removed_rb}
+                        action_str = (
+                            f"[ROLLED_BACK (LIVE OOB)] Đã gỡ riêng luật chặn {fc_target} của dịch vụ {target_str} "
+                            f"bằng iptables -D (còn lại {len(kept_items)} loại luật đang hoạt động)"
+                        )
+                        self.audit_logs.insert(
+                            0,
+                            {
+                                "time": datetime.now().strftime("%H:%M:%S"),
+                                "service_id": service_id,
+                                "scenario": "RuleRollback",
+                                "trigger": "RULE_RESET",
+                                "fault_class": fc_target,
+                                "confidence": "100%",
+                                "target": target_str,
+                                "action": action_str,
+                                "status": "ROLLED_BACK",
+                                "actor": actor,
+                            },
+                        )
+                        self.audit_logs = self.audit_logs[:200]
+                        self.db.record_remediation_action(
+                            result_id="rollback_rule",
+                            service_id=service_id,
+                            scenario="RuleRollback",
+                            trigger_mode="RULE_RESET",
+                            fault_class=fc_target,
+                            confidence="100%",
+                            target_device=target_str,
+                            action_text=action_str,
+                            status="ROLLED_BACK",
+                            actor=actor,
+                        )
+                        st = self._patch_latest_state_unlocked()
+
+                        def _rb_partial() -> None:
+                            execute_service_rollback(removed_plan, remaining_rules=remaining)
+
+                        threading.Thread(target=_rb_partial, daemon=True).start()
+                        return st
+
+                # Gỡ toàn bộ luật của dịch vụ này (không có fault_class hoặc là loại luật cuối cùng)
                 rule = self.active_service_rules.pop(service_id)
                 self.incident_cooldown.pop(service_id, None)
                 remaining = list(self.active_service_rules.values())
                 stop_attacks = not self.active_service_rules
-                target_str = f"{rule['service_name']} ({rule['address']}:{rule['port']})"
+                rb_cnt = len(rule.get("rollback_cmds") or []) or 1
                 action_str = (
-                    f"[ROLLED_BACK (LIVE OOB)] Đã gỡ rule bảo vệ riêng của dịch vụ {target_str} bằng iptables -D "
+                    f"[ROLLED_BACK (LIVE OOB)] Đã gỡ {rb_cnt} luật bảo vệ riêng của dịch vụ {target_str} bằng iptables -D "
                     f"(không ảnh hưởng các dịch vụ khác)"
                 )
                 self.audit_logs.insert(
@@ -1402,7 +1682,7 @@ class AIOpsStateEngine:
                         "service_id": service_id,
                         "scenario": "ServiceRollback",
                         "trigger": "SERVICE_RESET",
-                        "fault_class": rule["fault_class"],
+                        "fault_class": fc_target or rule["fault_class"],
                         "confidence": "100%",
                         "target": target_str,
                         "action": action_str,
@@ -1410,13 +1690,13 @@ class AIOpsStateEngine:
                         "actor": actor,
                     },
                 )
-                self.audit_logs = self.audit_logs[:30]
+                self.audit_logs = self.audit_logs[:200]
                 self.db.record_remediation_action(
                     result_id="rollback_srv",
                     service_id=service_id,
                     scenario="ServiceRollback",
                     trigger_mode="SERVICE_RESET",
-                    fault_class=rule["fault_class"],
+                    fault_class=fc_target or rule["fault_class"],
                     confidence="100%",
                     target_device=target_str,
                     action_text=action_str,
@@ -1457,7 +1737,7 @@ class AIOpsStateEngine:
                         "actor": actor,
                     },
                 )
-                self.audit_logs = self.audit_logs[:30]
+                self.audit_logs = self.audit_logs[:200]
                 self.db.record_remediation_action(
                     result_id="rollback_all",
                     service_id="ALL_SERVICES",
@@ -1545,7 +1825,7 @@ class AIOpsStateEngine:
                         "actor": "Alertmanager",
                     },
                 )
-                self.audit_logs = self.audit_logs[:30]
+                self.audit_logs = self.audit_logs[:200]
                 self.db.record_remediation_action(
                     result_id="alertmanager",
                     service_id=instance,
@@ -1612,7 +1892,7 @@ class AIOpsStateEngine:
 
         with self._lock:
             st = dict(self.latest_state or {})
-            mode_txt = "Tự động (Auto-Pilot)" if self.auto_pilot else "Chờ phê duyệt (Human-in-the-Loop)"
+            mode_txt = "Tự động ứng phó" if self.auto_pilot else "Chờ phê duyệt"
             evals = dict(st.get("service_evaluations") or {})
             active_cnt = len(self.active_service_rules)
             pending_cnt = len(self.pending_approvals)
@@ -1654,7 +1934,20 @@ class AIOpsStateEngine:
     # =========================================================================
     def _sync_runtime_from_settings_unlocked(self, cfg: Dict[str, Any]) -> None:
         self.auto_pilot = bool(cfg.get("auto_pilot", True))
+        m1_med = round(float(cfg.get("m1_threshold_medium", self.m1_default_th_med)), 4)
+        m1_high = round(float(cfg.get("m1_threshold_high", self.m1_default_th_high)), 4)
+        m1_crit = round(float(cfg.get("m1_threshold_critical", self.m1_default_th_crit)), 4)
+        if 0.35 <= m1_med < m1_high < m1_crit <= 0.95:
+            self.m1_th_med = m1_med
+            self.m1_th_high = m1_high
+            self.m1_th_crit = m1_crit
         self.forecast_threshold = float(cfg.get("forecast_threshold_pct", 60.0)) / 100.0
+        self.forecast_critical_pct = max(
+            round(self.forecast_threshold * 100.0 + 5.0, 1),
+            float(cfg.get("forecast_critical_pct", 80.0)),
+        )
+        m2_conf_pct = float(cfg.get("m2_confidence_threshold_pct", self.m2_default_conf_pct))
+        self.m2_conf_threshold = max(0.50, min(0.95, m2_conf_pct / 100.0))
         self.l3_auto_mitigate = bool(cfg.get("l3_auto_mitigate", True))
         self.l3_min_confidence_pct = float(cfg.get("l3_min_confidence_pct", 80.0))
         self.auto_resolved_cycles = int(cfg.get("auto_resolved_cycles", 2))
@@ -1663,7 +1956,7 @@ class AIOpsStateEngine:
         self.spike_log_cooldown_seconds = float(cfg.get("spike_log_cooldown_seconds", 18.0))
 
     def get_model_info(self) -> Dict[str, Any]:
-        """Thông số cố định của 2 Model AI đã huấn luyện (chỉ đọc để hiển thị minh bạch ở Cài đặt chung)."""
+        """Thông số hiện hành và ngưỡng hiệu chuẩn gốc từ file .pkl của 2 Model AI + Dự báo 5m."""
         return {
             "model1_features": len(self.m1_bundle.get("feature_names", [])),
             "model1_thresholds": {
@@ -1674,7 +1967,27 @@ class AIOpsStateEngine:
             "model2_features": len(self.m2_rca_bundle.get("feature_names", [])),
             "model2_confidence_threshold_pct": round(self.m2_conf_threshold * 100.0, 1),
             "model2_classes": list(self.m2_rca_bundle.get("class_names", [])),
+            "calibrated_defaults": {
+                "m1_threshold_medium": round(self.m1_default_th_med, 4),
+                "m1_threshold_high": round(self.m1_default_th_high, 4),
+                "m1_threshold_critical": round(self.m1_default_th_crit, 4),
+                "forecast_threshold_pct": 60.0,
+                "forecast_critical_pct": 80.0,
+                "m2_confidence_threshold_pct": round(self.m2_default_conf_pct, 1),
+            },
         }
+
+    def _settings_services_list_unlocked(self) -> List[Dict[str, Any]]:
+        return [
+            {
+                "service_id": s["service_id"],
+                "service_name": s.get("service_name", s["service_id"]),
+                "service_type": s.get("service_type", "HTTP"),
+                "address": s.get("address", "-"),
+                "port": s.get("port", 80),
+            }
+            for s in self.db.services_cache
+        ]
 
     def apply_settings(
         self, payload: Dict[str, Any], actor: str = "admin (Web)"
@@ -1684,10 +1997,14 @@ class AIOpsStateEngine:
             if err or not updated:
                 return None, err or "Không thể cập nhật cài đặt"
             self._sync_runtime_from_settings_unlocked(updated)
+            custom_cnt = len(self.db.service_alert_rules)
             action_str = (
-                f"[CÀI ĐẶT CHUNG] Cập nhật: L2={updated['escalation_l2_seconds']}s, "
-                f"L3={updated['escalation_l3_seconds']}s (Tự bảo vệ: {'Bật' if updated['l3_auto_mitigate'] else 'Tắt'}, "
-                f"≥{updated['l3_min_confidence_pct']}%), Dự báo 5m ≥ {updated['forecast_threshold_pct']}%, "
+                f"[CÀI ĐẶT CHUNG] M1({updated['m1_threshold_medium']:.4f}/{updated['m1_threshold_high']:.4f}/"
+                f"{updated['m1_threshold_critical']:.4f}), Dự báo 5m(≥{updated['forecast_threshold_pct']}% / "
+                f"CRIT≥{updated['forecast_critical_pct']}%), M2 Conf≥{updated['m2_confidence_threshold_pct']}%, "
+                f"AlertRules riêng={custom_cnt} dịch vụ, "
+                f"L2={updated['escalation_l2_seconds']}s, L3={updated['escalation_l3_seconds']}s "
+                f"(Tự bảo vệ: {'Bật' if updated['l3_auto_mitigate'] else 'Tắt'}, ≥{updated['l3_min_confidence_pct']}%), "
                 f"Auto-Pilot={'Bật' if updated['auto_pilot'] else 'Tắt'}, "
                 f"Auto-Resolved={updated['auto_resolved_cycles']} chu kỳ"
             )
@@ -1706,7 +2023,7 @@ class AIOpsStateEngine:
                     "actor": actor,
                 },
             )
-            self.audit_logs = self.audit_logs[:30]
+            self.audit_logs = self.audit_logs[:200]
             self.db.record_remediation_action(
                 result_id="settings",
                 service_id="SYSTEM_SETTINGS",
@@ -1721,13 +2038,26 @@ class AIOpsStateEngine:
             )
             self.notifier.apply_runtime_settings(updated)
             state = self._patch_latest_state_unlocked()
-        return {"settings": updated, "telegram": self.notifier.get_status(), "state": state}, None
+            srv_rules = self.db.get_service_alert_rules()
+            srv_list = self._settings_services_list_unlocked()
+        return {
+            "settings": updated,
+            "service_rules": srv_rules,
+            "services": srv_list,
+            "telegram": self.notifier.get_status(),
+            "model_info": self.get_model_info(),
+            "state": state,
+        }, None
 
     def reset_settings(self, actor: str = "admin (Web)") -> Dict[str, Any]:
         with self._lock:
             defaults = self.db.reset_system_settings()
             self._sync_runtime_from_settings_unlocked(defaults)
-            action_str = "[CÀI ĐẶT CHUNG] Đã khôi phục toàn bộ thông số vận hành về mặc định chuẩn (L2=30s, L3=60s, Dự báo 5m ≥ 60%)"
+            action_str = (
+                f"[CÀI ĐẶT CHUNG] Đã khôi phục mặc định chuẩn & gỡ toàn bộ AlertRule riêng "
+                f"(M1={defaults['m1_threshold_medium']:.4f}/{defaults['m1_threshold_high']:.4f}/{defaults['m1_threshold_critical']:.4f}, "
+                f"Dự báo 5m≥{defaults['forecast_threshold_pct']}%, M2≥{defaults['m2_confidence_threshold_pct']}%, L2=30s, L3=60s)"
+            )
             self.audit_logs.insert(
                 0,
                 {
@@ -1743,7 +2073,7 @@ class AIOpsStateEngine:
                     "actor": actor,
                 },
             )
-            self.audit_logs = self.audit_logs[:30]
+            self.audit_logs = self.audit_logs[:200]
             self.db.record_remediation_action(
                 result_id="settings_reset",
                 service_id="SYSTEM_SETTINGS",
@@ -1758,7 +2088,16 @@ class AIOpsStateEngine:
             )
             self.notifier.apply_runtime_settings(defaults)
             state = self._patch_latest_state_unlocked()
-        return {"settings": defaults, "telegram": self.notifier.get_status(), "state": state}
+            srv_rules = self.db.get_service_alert_rules()
+            srv_list = self._settings_services_list_unlocked()
+        return {
+            "settings": defaults,
+            "service_rules": srv_rules,
+            "services": srv_list,
+            "telegram": self.notifier.get_status(),
+            "model_info": self.get_model_info(),
+            "state": state,
+        }
 
 
 ENGINE = AIOpsStateEngine()
@@ -1895,9 +2234,9 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
                     "stats": ENGINE.db.get_collection_stats(),
                     "Services": list(ENGINE.db.services_cache),
                     "AlertRules": list(ENGINE.db.rules_cache),
-                    "AIResults": list(ENGINE.db.ai_results_cache[:12]),
-                    "Alerts": list(ENGINE.db.alerts_cache[:12]),
-                    "RemediationActions": list(ENGINE.db.remediations_cache[:12]),
+                    "AIResults": list(ENGINE.db.ai_results_cache[:200]),
+                    "Alerts": list(ENGINE.db.alerts_cache[:200]),
+                    "RemediationActions": list(ENGINE.db.remediations_cache[:200]),
                 }
             self._send_json(payload)
 
@@ -1923,6 +2262,8 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
             with ENGINE._lock:
                 payload = {
                     "settings": ENGINE.db.get_system_settings(),
+                    "service_rules": ENGINE.db.get_service_alert_rules(),
+                    "services": ENGINE._settings_services_list_unlocked(),
                     "telegram": ENGINE.notifier.get_status(),
                     "model_info": ENGINE.get_model_info(),
                 }
@@ -2025,6 +2366,8 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
             with ENGINE._lock:
                 if thr_val is not None:
                     ENGINE.forecast_threshold = thr_val / 100.0
+                    if ENGINE.forecast_critical_pct < thr_val + 5.0:
+                        ENGINE.forecast_critical_pct = round(min(98.0, thr_val + 5.0), 1)
                 if auto_val is not None:
                     ENGINE.auto_pilot = auto_val
                 ENGINE.db.update_policy_rule(threshold_pct=thr_val, auto_pilot=auto_val)
@@ -2040,7 +2383,11 @@ class DashboardHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(state)
 
         elif self.path == "/api/rollback":
-            state = ENGINE.rollback_service_or_all(service_id=body.get("service_id"), actor=actor)
+            state = ENGINE.rollback_service_or_all(
+                service_id=body.get("service_id"),
+                fault_class=body.get("fault_class"),
+                actor=actor,
+            )
             self._send_json(state)
 
         elif self.path == "/api/telegram/test":

@@ -185,7 +185,7 @@ export default function App() {
               onNavigate={setView}
             />
           )}
-          {activeView === 'response' && <ResponsePage ctx={ctx} />}
+          {activeView === 'response' && <ResponsePage ctx={ctx} onOpenService={openService} />}
           {activeView === 'services' && <ServicesPage ctx={ctx} onOpenService={openService} />}
           {activeView === 'users' && ctx.user.role === 'ADMIN' && <UsersPage ctx={ctx} />}
           {activeView === 'settings' && ctx.user.role === 'ADMIN' && <SettingsPage ctx={ctx} />}

@@ -28,7 +28,32 @@ export const FAULT_LABELS = {
   'Normal (Standby)': 'Không có sự cố',
 };
 
-export const faultLabel = (f) => FAULT_LABELS[f] || f || 'Không có sự cố';
+export const faultLabel = (f) => {
+  if (!f) return 'Không có sự cố';
+  if (FAULT_LABELS[f]) return FAULT_LABELS[f];
+  if (typeof f === 'string' && f.includes(',')) {
+    return f
+      .split(',')
+      .map((part) => {
+        const k = part.trim();
+        return FAULT_LABELS[k] || k;
+      })
+      .filter(Boolean)
+      .join(', ');
+  }
+  return f;
+};
+
+export function getRuleCommands(rule) {
+  if (!rule) return [];
+  if (Array.isArray(rule.commands) && rule.commands.length > 0) {
+    return rule.commands.filter(Boolean);
+  }
+  return String(rule.command || '')
+    .split('&&')
+    .map((c) => c.trim())
+    .filter(Boolean);
+}
 
 export function worstLevel(evals) {
   let worst = 'NORMAL';

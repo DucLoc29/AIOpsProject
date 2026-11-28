@@ -18,6 +18,7 @@ export default function UsersPage({ ctx }) {
   const [successMsg, setSuccessMsg] = useState('');
   const [query, setQuery] = useState('');
   const [roleFilter, setRoleFilter] = useState('ALL');
+  const [statusFilter, setStatusFilter] = useState('ALL');
   const [editingUsername, setEditingUsername] = useState(null);
   const [form, setForm] = useState(EMPTY_FORM);
   const [showForm, setShowForm] = useState(false);
@@ -58,16 +59,15 @@ export default function UsersPage({ ctx }) {
   const filteredUsers = useMemo(() => {
     const q = query.trim().toLowerCase();
     return users.filter((u) => {
-      if (roleFilter === 'ADMIN' && u.role !== 'ADMIN') return false;
-      if (roleFilter === 'VIEWER' && u.role !== 'VIEWER') return false;
-      if (roleFilter === 'LOCKED' && u.status !== 'LOCKED') return false;
+      if (roleFilter !== 'ALL' && u.role !== roleFilter) return false;
+      if (statusFilter !== 'ALL' && (u.status || 'ACTIVE') !== statusFilter) return false;
       if (!q) return true;
       return (
         String(u.username || '').toLowerCase().includes(q) ||
         String(u.full_name || '').toLowerCase().includes(q)
       );
     });
-  }, [users, query, roleFilter]);
+  }, [users, query, roleFilter, statusFilter]);
 
   const startAdd = () => {
     setEditingUsername(null);
@@ -255,30 +255,44 @@ export default function UsersPage({ ctx }) {
           </button>
         </div>
 
-        <div className="user-toolbar">
+        <div className="table-toolbar">
           <input
-            className="apple-select user-search"
+            className="apple-select table-filter-input"
             placeholder="Tìm theo tên đăng nhập hoặc họ tên..."
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
-          <div className="row-actions">
-            {[
-              { id: 'ALL', label: 'Tất cả' },
-              { id: 'ADMIN', label: 'ADMIN' },
-              { id: 'VIEWER', label: 'VIEWER' },
-              { id: 'LOCKED', label: 'Đã khóa' },
-            ].map((f) => (
-              <button
-                key={f.id}
-                type="button"
-                className={`apple-btn ${roleFilter === f.id ? 'active' : 'secondary'}`}
-                onClick={() => setRoleFilter(f.id)}
-              >
-                {f.label}
-              </button>
-            ))}
-          </div>
+          <select
+            className="apple-select table-filter-select"
+            value={roleFilter}
+            onChange={(e) => setRoleFilter(e.target.value)}
+          >
+            <option value="ALL">Tất cả vai trò</option>
+            <option value="ADMIN">ADMIN</option>
+            <option value="VIEWER">VIEWER</option>
+          </select>
+          <select
+            className="apple-select table-filter-select"
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+          >
+            <option value="ALL">Tất cả trạng thái</option>
+            <option value="ACTIVE">Hoạt động</option>
+            <option value="LOCKED">Đã khóa</option>
+          </select>
+          {(query || roleFilter !== 'ALL' || statusFilter !== 'ALL') && (
+            <button
+              type="button"
+              className="apple-btn secondary preset-btn"
+              onClick={() => {
+                setQuery('');
+                setRoleFilter('ALL');
+                setStatusFilter('ALL');
+              }}
+            >
+              Xóa bộ lọc
+            </button>
+          )}
         </div>
 
         {err && (
@@ -373,7 +387,13 @@ export default function UsersPage({ ctx }) {
         {loading ? (
           <p className="muted">Đang tải danh sách tài khoản...</p>
         ) : (
-          <DataTable columns={columns} rows={filteredUsers} empty="Không có tài khoản nào khớp bộ lọc." />
+          <DataTable
+            columns={columns}
+            rows={filteredUsers}
+            pageSize={8}
+            resetKey={`${query}|${roleFilter}|${statusFilter}`}
+            empty="Không có tài khoản nào khớp bộ lọc."
+          />
         )}
       </div>
     </>

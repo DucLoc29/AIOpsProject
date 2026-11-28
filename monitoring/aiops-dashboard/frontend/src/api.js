@@ -39,7 +39,12 @@ export const api = {
   setPolicy: (payload) => sendJson('POST', '/api/policy', payload),
   approve: (service_id) => sendJson('POST', '/api/approve', service_id ? { service_id } : {}),
   dismiss: (service_id) => sendJson('POST', '/api/dismiss', service_id ? { service_id } : {}),
-  rollback: (service_id) => sendJson('POST', '/api/rollback', service_id ? { service_id } : {}),
+  rollback: (service_id, fault_class) => {
+    const payload = {};
+    if (service_id) payload.service_id = service_id;
+    if (fault_class) payload.fault_class = fault_class;
+    return sendJson('POST', '/api/rollback', payload);
+  },
   testTelegram: () => sendJson('POST', '/api/telegram/test', {}),
   createService: (payload) => sendJson('POST', '/api/services', payload),
   updateService: (service_id, payload) => sendJson('PUT', `/api/services/${service_id}`, payload),
